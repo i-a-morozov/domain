@@ -1,0 +1,67 @@
+[project]
+name = "domain"
+description = "Computation of center stability domain by bounding unstable cloud"
+readme = "README.MD"
+requires-python = ">=3.14"
+keywords = ["stability", "domain", "symplectic", "maps"]
+authors = [{name = "Ivan Morozov"}]
+license = {text = "MIT"}
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14"
+]
+dependencies = ["numpy>=2.3.3", "numba>=0.63.1"]
+dynamic = ["version"]
+
+[project.urls]
+documentation = "https://i-a-morozov.github.io/domain/"
+repository = "https://github.com/i-a-morozov/domain"
+
+[build-system]
+requires = ["setuptools", "setuptools-scm[toml]", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["domain"]
+
+[tool.setuptools.package-data]
+domain = ["py.typed", "*.pyi"]
+
+[tool.setuptools.dynamic]
+version = {attr = "domain.__version__"}
+
+[project.optional-dependencies]
+test = ["mypy", "pylint", "pytest", "pytest-cov"]
+docs = ["pandoc", "sphinx-rtd-theme", "ipykernel", "nbsphinx"]
+build = ["build", "setuptools", "twine"]
+examples = ["jupyterlab",  "pandas", "matplotlib", "seaborn"]
+all = ["domain[test, docs, build, examples]"]
+
+[tool.pylint.'MESSAGES CONTROL']
+disable=[
+    "raw-checker-failed",
+    "bad-inline-option",
+    "locally-disabled",
+    "file-ignored",
+    "suppressed-message",
+    "useless-suppression",
+    "deprecated-pragma",
+    "use-symbolic-message-instead",
+    "function-redefined",
+    "no-value-for-parameter",
+    "no-member",
+    "redefined-builtin",
+    "unused-argument",
+    "invalid-name",
+    "too-many-locals",
+    "redefined-outer-name",
+    "not-callable"
+]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::DeprecationWarning"
+]
