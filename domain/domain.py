@@ -108,7 +108,7 @@ class Domain:
         points = numpy.ascontiguousarray(points, dtype=float64)
         return index(points, self.origin, self.counts, self.strides, float(self.cell))
 
-    def convert(self, keys:NDArray[int64]) -> NDArray[float64]:
+    def convert(self, keys:NDArray[int64]) -> NDArray[int64]:
         keys = numpy.ascontiguousarray(keys, dtype=int64)
         return convert(keys, self.counts, self.strides)
 
@@ -142,7 +142,7 @@ class Domain:
     def construct(self) -> NDArray[float64]:
         return self.transform(self.list)
 
-    def volume(self, n:int, m:int, center:NDArray[float64], directions:NDArray[float64], factors:NDArray[float64]) -> float:
+    def volume(self, n:int, m:int, center:NDArray[float64], directions:NDArray[float64], factors:NDArray[float64]) -> Tuple[float64, float64]:
         return volume(self.dimension, n, m, self.origin, self.counts, self.strides, self.cell, center, directions, factors, self.list)
     
     def boundary(self, n:int, m:int, center:NDArray[float64], directions:NDArray[float64]) -> Tuple[NDArray[int64], NDArray[float64], NDArray[float64]]:
@@ -567,6 +567,62 @@ def position(indices, strides):
 
 
 @njit
+def interval(
+    origin:NDArray[float64],
+    counts:NDArray[int64],
+    cell:float,
+    start:NDArray[float64],
+    direction:NDArray[float64],
+    radius:float
+) -> Tuple[bool_, float64, float64]:
+    """
+    Compute the ray-box overlap interval on [0, radius]
+
+    Parameters
+    ----------
+    origin : NDArray[float64]
+        grid origin (lower corner), shape (dimension, )
+    counts : NDArray[int64]
+        number of cells per dimension, shape (dimension, )
+    cell : float
+        cell size
+    start : NDArray[float64]
+        ray start point, shape (dimension, )
+    direction : NDArray[float64]
+        ray direction, shape (dimension, )
+    radius : float
+        maximum traversal distance along the ray
+
+    Returns
+    -------
+    Tuple[bool_, float64, float64]
+
+    """
+    lower = 0.0
+    upper = radius
+    for i in range(len(origin)):
+        left = origin[i]
+        right = origin[i] + counts[i]*cell
+        di = direction[i]
+        xi = start[i]
+        if di == 0.0:
+            if xi < left or xi > right:
+                return False, 0.0, 0.0
+            continue
+        t0 = (left - xi)/di
+        t1 = (right - xi)/di
+        if t0 > t1:
+            t0, t1 = t1, t0
+        if t0 > lower:
+            lower = t0
+        if t1 < upper:
+            upper = t1
+        if lower > upper:
+            return False, 0.0, 0.0
+    return True, lower, upper
+
+
+@njit
 def intersection(
     origin:NDArray[float64],
     counts:NDArray[int64],
@@ -606,9 +662,16 @@ def intersection(
     """
     dimension = len(origin)
     point = numpy.empty(dimension, dtype=float64)
+    hit, enter, _ = interval(origin, counts, cell, start, direction, radius)
+    if not hit:
+        for k in range(dimension):
+            point[k] = start[k] + radius*direction[k]
+        return int64(-1), radius, point
+    total = enter if enter > 0.0 else 0.0
     idx = numpy.empty(dimension, dtype=int64)
     for i in range(dimension):
-        j = numpy.floor((start[i] - origin[i]) / cell)
+        x = start[i] + total*direction[i]
+        j = numpy.floor((x - origin[i]) / cell)
         if j < 0:
             j = 0
         if j >= counts[i]:
@@ -617,8 +680,8 @@ def intersection(
     key = position(idx, strides)
     if member(keys, key):
         for k in range(dimension):
-            point[k] = start[k]
-        return key, 0.0, point
+            point[k] = start[k] + total*direction[k]
+        return key, total, point
     steps = numpy.empty(dimension, dtype=int64)
     limit = numpy.empty(dimension, dtype=float64)
     delta = numpy.empty(dimension, dtype=float64)
@@ -636,24 +699,62 @@ def intersection(
             steps[i] = 0
             limit[i] = numpy.inf
             delta[i] = numpy.inf
+    tied = numpy.empty(dimension, dtype=bool_)
+    trial = numpy.empty(dimension, dtype=int64)
     while True:
-        axis = 0
         current = limit[0]
         for i in range(1, dimension):
             if limit[i] < current:
                 current = limit[i]
-                axis = i
         total = current
         if total > radius:
             for k in range(dimension):
                 point[k] = start[k] + radius*direction[k]
             return int64(-1), radius, point
-        idx[axis] += steps[axis]
-        if idx[axis] < 0 or idx[axis] >= counts[axis]:
+        epsilon = 32.0*numpy.finfo(float64).eps*(1.0 + numpy.abs(current))
+        tie = 0
+        for i in range(dimension):
+            flag = numpy.abs(limit[i] - current) <= epsilon
+            tied[i] = flag
+            if flag:
+                tie += 1
+        hit = int64(-1)
+        found = False
+        if tie > 1:
+            for mask in range(1, 1 << dimension):
+                valid = True
+                use = False
+                for i in range(dimension):
+                    value = idx[i]
+                    if tied[i] and ((mask >> i) & 1):
+                        use = True
+                        value += steps[i]
+                    trial[i] = value
+                    if value < 0 or value >= counts[i]:
+                        valid = False
+                        break
+                if not valid or not use:
+                    continue
+                key = position(trial, strides)
+                if member(keys, key):
+                    if not found or key < hit:
+                        hit = key
+                        found = True
+            if found:
+                for k in range(dimension):
+                    point[k] = start[k] + total*direction[k]
+                return hit, total, point
+        exited = False
+        for i in range(dimension):
+            if tied[i]:
+                idx[i] += steps[i]
+                if idx[i] < 0 or idx[i] >= counts[i]:
+                    exited = True
+            limit[i] += delta[i] if tied[i] else 0.0
+        if exited:
             for k in range(dimension):
                 point[k] = start[k] + total*direction[k]
             return int64(-1), total, point
-        limit[axis] += delta[axis]
         key = position(idx, strides)
         if member(keys, key):
             for k in range(dimension):
