@@ -1,2 +1,0 @@
-.. automodule:: twiss.invariant
-    :members:
