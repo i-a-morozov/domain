@@ -1,8 +1,9 @@
 [project]
 name = "domain"
+version = "0.1.1"
 description = "Computation of center stability domain by bounding unstable cloud"
 readme = "README.MD"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 keywords = ["stability", "domain", "symplectic", "maps"]
 authors = [{name = "Ivan Morozov"}]
 license = {text = "MIT"}
@@ -11,10 +12,9 @@ classifiers = [
     "Intended Audience :: Developers",
     "Natural Language :: English",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.14"
+    "Programming Language :: Python :: 3.12"
 ]
 dependencies = ["numpy>=2.3.3", "numba>=0.63.1"]
-dynamic = ["version"]
 
 [project.urls]
 documentation = "https://i-a-morozov.github.io/domain/"
@@ -29,9 +29,6 @@ include = ["domain"]
 
 [tool.setuptools.package-data]
 domain = ["py.typed", "*.pyi"]
-
-[tool.setuptools.dynamic]
-version = {attr = "domain.__version__"}
 
 [project.optional-dependencies]
 test = ["mypy", "pylint", "pytest", "pytest-cov"]
