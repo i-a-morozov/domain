@@ -6,6 +6,8 @@
 
 Computation of center stability **domain** by bounding unstable cloud.
 
+[3D projections link](https://f6qncrayvsei6xxltzmqfs.streamlit.app/)
+
 # Install & build
 
 ```
@@ -15,4 +17,3 @@ or
 ```
 $ pip install domain -U
 ```
-
