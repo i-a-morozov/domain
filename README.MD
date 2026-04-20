@@ -6,7 +6,7 @@
 
 Computation of center stability **domain** by bounding unstable cloud.
 
-[3D projections link](https://f6qncrayvsei6xxltzmqfs.streamlit.app/)
+[3D projections](https://f6qncrayvsei6xxltzmqfs.streamlit.app/): view precomputed domain slices (doesn't work on mobile, requires several GBs of RAM to display 500k+ points in 3D plot)
 
 # Install & build
 
