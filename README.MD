@@ -40,11 +40,43 @@ $$
 \begin{aligned}
 q_x' &= q_x + p_x \\
 q_y' &= q_y + p_y \\
-p_x' &= p_x + \frac{k_x}{2\pi}\sin(2\pi  q_x') + k_{xy}\sin\!\bigl(2\pi( q_x' +  q_y')\bigr) \\
-p_y' &= p_y + \frac{k_y}{2\pi}\sin(2\pi  q_y') + k_{xy}\sin\!\bigl(2\pi( q_x' +  q_y')\bigr)
+p_x' &= p_x + \frac{k_x}{2\pi}\sin(2\pi  q_x') + k_{xy}\sin\bigl(2\pi( q_x' +  q_y')\bigr) \\
+p_y' &= p_y + \frac{k_y}{2\pi}\sin(2\pi  q_y') + k_{xy}\sin\bigl(2\pi( q_x' +  q_y')\bigr)
 \end{aligned}
 $$
 
 Precomputed [3D projections](https://froeschle4d.streamlit.app/).
+
+Doesn't work on mobile, requires several GBs of RAM to display 500k+ points in 3D plot.
+
+# Moser map
+
+$$
+\begin{aligned}
+\xi_1' &= \xi_1 + \frac{\delta r_1 - \gamma r_2}{\alpha\delta - \beta\gamma} \\
+\xi_2' &= \xi_2 + \frac{-\beta r_1 + \alpha r_2}{\alpha\delta - \beta\gamma} \\
+\eta_1' &= \alpha \xi_1 + \beta \xi_2 \\
+\eta_2' &= \gamma \xi_1 + \delta \xi_2
+\end{aligned}
+$$
+
+where
+
+$$
+\begin{aligned}
+r_1 &= -\eta_1 + \alpha \xi_1 + \beta \xi_2 + \frac{\partial U}{\partial \xi_1} \\
+r_2 &= -\eta_2 + \gamma \xi_1 + \delta \xi_2 + \frac{\partial U}{\partial \xi_2}
+\end{aligned}
+$$
+
+and
+
+$$
+\begin{aligned}
+U(\xi_1, \xi_2) = a\,\xi_1 + b\,\xi_2 + \frac{1}{2}c\,\xi_1^2 + \mu \xi_1^3 + \xi_1 \xi_2^2
+\end{aligned}
+$$
+
+Precomputed [3D projections](https://moser4d.streamlit.app/).
 
 Doesn't work on mobile, requires several GBs of RAM to display 500k+ points in 3D plot.
