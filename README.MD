@@ -1,4 +1,5 @@
 # domain, 2025-2026
+#
 
 <p align="center">
   <img width="500" height="250" src="https://github.com/i-a-morozov/domain/blob/main/data/cat.png">
@@ -6,7 +7,7 @@
 
 Computation of center stability **domain** by bounding unstable cloud.
 
-[3D projections](https://f6qncrayvsei6xxltzmqfs.streamlit.app/): view precomputed domain slices (doesn't work on mobile, requires several GBs of RAM to display 500k+ points in 3D plot)
+[3D projections](https://henon4d.streamlit.app/): view precomputed domain slices (doesn't work on mobile, requires several GBs of RAM to display 500k+ points in 3D plot)
 
 [3D projection scan video](https://www.youtube.com/watch?v=EDtpyUOtCRg)
 
@@ -19,3 +20,7 @@ or
 ```
 $ pip install domain -U
 ```
+
+# Froeschle
+
+View [3D projections](https://froeschle4d.streamlit.app/)
