@@ -1,0 +1,154 @@
+"""
+Utility mappings
+
+"""
+import numpy as np
+from numpy.typing import NDArray
+
+from numba import njit
+
+
+"""
+Utility mappings
+
+"""
+import numpy as np
+from numpy.typing import NDArray
+
+from numba import njit
+
+
+@njit
+def henon_forward(
+    x: NDArray[np.float64],
+    parameters: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """
+    4D Henon symplectic mapping.
+
+    Parameters
+    ----------
+    x: NDArray[np.float64], (dimension, )
+        Initial condition.
+    parameters: NDArray[np.float64]
+        Mapping parameters ordered as [nux, nuy, mu].
+
+    Returns
+    -------
+    NDArray[np.float64]
+
+    """
+    qx, qy, px, py = x
+    nux, nuy, mu = parameters
+    ax = 2.0*np.pi*nux
+    ay = 2.0*np.pi*nuy
+    cx = np.cos(ax)
+    sx = np.sin(ax)
+    cy = np.cos(ay)
+    sy = np.sin(ay)
+    Qx = cx*qx + sx*(px + qx**2 - qy**2 + mu*(qx**3 - 3.0*qx*qy**2))
+    Qy = cy*qy + sy*(py - 2.0*qx*qy + mu*(-3.0*qx**2*qy + qy**3))
+    Px = cx*(px + qx**2 - qy**2 + mu*(qx**3 - 3.0*qx*qy**2)) - sx*qx
+    Py = cy*(py - 2.0*qx*qy + mu*(-3.0*qx**2*qy + qy**3)) - sy*qy
+    return np.array([Qx, Qy, Px, Py])
+
+
+@njit
+def henon_inverse(
+    x: NDArray[np.float64],
+    parameters: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """
+    4D Henon symplectic mapping inverse.
+
+    Parameters
+    ----------
+    x: NDArray[np.float64], (dimension, )
+        Initial condition.
+    parameters: NDArray[np.float64]
+        Mapping parameters ordered as [nux, nuy, mu].
+
+    Returns
+    -------
+    NDArray[np.float64]
+
+    """
+    qx, qy, px, py = x
+    nux, nuy, mu = parameters
+    ax = 2.0*np.pi*nux
+    ay = 2.0*np.pi*nuy
+    cx = np.cos(ax)
+    sx = np.sin(ax)
+    cy = np.cos(ay)
+    sy = np.sin(ay)
+    Qx = cx*qx - sx*px
+    Qy = cy*qy - sy*py
+    Px = cx*px + sx*qx - Qx**2 + Qy**2 - mu*(Qx**3 - 3.0*Qx*Qy**2)
+    Py = cy*py + sy*qy + 2.0*Qx*Qy - mu*(-3.0*Qx**2*Qy + Qy**3)
+    return np.array([Qx, Qy, Px, Py])
+
+
+@njit
+def froeschle_forward(
+    x: NDArray[np.float64],
+    parameters: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """
+    4D Froeschle symplectic mapping.
+
+    Parameters
+    ----------
+    x: NDArray[np.float64], (dimension, )
+        Initial condition.
+    parameters: NDArray[np.float64]
+        Mapping parameters ordered as [kx, ky, kxy].
+
+    Returns
+    -------
+    NDArray[np.float64]
+
+    """
+    qx, qy, px, py = x
+    kx, ky, kxy = parameters
+    Qx = qx + px
+    Qy = qy + py
+    Px = px + kx/(2.0*np.pi)*np.sin(2.0*np.pi*Qx) + kxy*np.sin(2.0*np.pi*(Qx + Qy))
+    Py = py + ky/(2.0*np.pi)*np.sin(2.0*np.pi*Qy) + kxy*np.sin(2.0*np.pi*(Qx + Qy))
+    Qx = ((Qx + 0.5) % 1.0) - 0.5
+    Qy = ((Qy + 0.5) % 1.0) - 0.5
+    Px = ((Px + 0.5) % 1.0) - 0.5
+    Py = ((Py + 0.5) % 1.0) - 0.5
+    return np.array([Qx, Qy, Px, Py])
+
+
+@njit
+def froeschle_inverse(
+    x: NDArray[np.float64],
+    parameters: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """
+    4D Froeschle symplectic mapping inverse.
+
+    Parameters
+    ----------
+    x: NDArray[np.float64], (dimension, )
+        Initial condition.
+    parameters: NDArray[np.float64]
+        Mapping parameters ordered as [kx, ky, kxy].
+
+    Returns
+    -------
+    NDArray[np.float64]
+
+    """
+    Qx, Qy, Px, Py = x
+    kx, ky, kxy = parameters
+    px = Px - kx/(2.0*np.pi)*np.sin(2.0*np.pi*Qx) - kxy*np.sin(2.0*np.pi*(Qx + Qy))
+    py = Py - ky/(2.0*np.pi)*np.sin(2.0*np.pi*Qy) - kxy*np.sin(2.0*np.pi*(Qx + Qy))
+    qx = Qx - px
+    qy = Qy - py
+    qx = ((qx + 0.5) % 1.0) - 0.5
+    qy = ((qy + 0.5) % 1.0) - 0.5
+    px = ((px + 0.5) % 1.0) - 0.5
+    py = ((py + 0.5) % 1.0) - 0.5
+    return np.array([qx, qy, px, py])

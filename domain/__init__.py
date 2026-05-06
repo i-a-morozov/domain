@@ -13,6 +13,8 @@ import numpy
 from numpy import float64
 from numpy.typing import NDArray
 
+from numba import njit
+
 from domain.da import da
 from domain.domain import Domain
 from domain.sample import filter
@@ -141,6 +143,8 @@ class Result:
         convergence data containers
     costs: Optional[list]
         cost data containers
+    rads: list
+        current radius estimates for each round
     cells: list[Domain]
         resulting boundary domains
     container: Optional[Domain]
@@ -149,6 +153,7 @@ class Result:
     """
     data: list
     costs: Optional[list]
+    rads: list
     cells: list[Domain]
     container: Optional[Domain]
 
@@ -195,6 +200,7 @@ def compute(
     """
     table = []
     costs = [] if (complexity and cost is not None) else None
+    rads = []
     cells = []
     container = Domain(configuration.lb, configuration.ub, configuration.dl) if full else None
     generator = orbit(configuration.size, configuration.threshold, mapping)
@@ -234,11 +240,13 @@ def compute(
             container.update(points)
         local_data = []
         local_cost = [] if costs is not None else None
+        local_rads = []
         while domains:
             domain = domains[0]
             if domain.size == 0:
                 cells.append(domains.pop(0))
                 table.append(list(local_data))
+                rads.append(list(local_rads))
                 if costs is not None:
                     costs.append([*initial_cost, list(local_cost)])
                 continue
@@ -279,6 +287,7 @@ def compute(
                     domains = [boundary] + domains[1:]
                     domain = domains[0]
                     local_data.append(numpy.asarray([flag, domain.size, len(ds)]))
+                    local_rads.append(radius)
                     if local_cost is not None:
                         out = numpy.zeros(len(initial), dtype=numpy.int64)
                         scan(initial, out, cost, parameters)
@@ -292,9 +301,185 @@ def compute(
                 print()
             cells.append(domains.pop(0))
             table.append(list(local_data))
+            rads.append(list(local_rads))
             if costs is not None:
                 costs.append([*initial_cost, list(local_cost)])
-    return Result(table, costs, cells, container)
+    return Result(table, costs, rads, cells, container)
+
+
+def indicator(
+    configuration:Configuration,
+    parameters:NDArray[float64],
+    pairs:List[tuple[int, int]],
+    factory:Callable[[int, Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]], Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]]], Callable[[NDArray[float64], NDArray[float64]], float64]],
+    forward:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]],
+    inverse:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]],
+    threshold:float,
+    cost:Optional[Callable[[NDArray[float64], NDArray[float64]], int]]=None,
+    full:bool=False,
+    complexity:bool=True,
+    verbose:bool=True
+) -> Result:
+    """
+    Run domain construction loop using a scalar indicator threshold
+
+    Parameters
+    ----------
+    configuration: Configuration
+        domain construction configuration
+    parameters: NDArray[float64]
+        additional parameters passed to mappings, indicator, and cost
+    pairs: Sequence[tuple[int, int]]
+        ray-count pairs used in the boundary saturation loop
+    factory: Callable
+        indicator factory called as `factory(configuration.size, forward, inverse)`
+    forward: Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]]
+        forward mapping
+    inverse: Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]]
+        inverse mapping
+    threshold: float
+        indicator threshold used to classify escaping initials
+    cost: Optional[Callable[[NDArray[float64], NDArray[float64]], int]], default=None
+        optional cost function
+    full: bool, default=True
+        flag to construct and update the full domain container
+    complexity: bool, default=True
+        flag to compute cost data when `cost` is provided
+    verbose: bool, default=False
+        verbose output flag
+
+    Returns
+    -------
+    Result
+
+    """
+    metric = factory(configuration.size, forward, inverse)
+    generator = orbit(configuration.size, configuration.threshold, forward)
+
+    @njit
+    def objective(
+        state:NDArray[float64],
+        parameters:NDArray[float64]
+    ) -> bool:
+        return metric(state, parameters) <= threshold
+
+    table = []
+    costs = [] if (complexity and cost is not None) else None
+    rads = []
+    cells = []
+    container = Domain(configuration.lb, configuration.ub, configuration.dl) if full else None
+    for epoch in range(configuration.nepochs):
+        if verbose:
+            print(epoch)
+            print()
+        seed = None if configuration.seed is None else configuration.seed + epoch
+        ds = directions(configuration.dimension, configuration.ndirections, random=True, seed=seed)
+        rb, xb = da(configuration.dimension, configuration.dr, configuration.threshold, configuration.center, ds, objective, parameters, unstable=True)
+        values = numpy.zeros(configuration.ndirections, dtype=float64)
+        scan(xb, values, metric, parameters)
+        escaped = xb[values > threshold]
+        if len(escaped):
+            buffer = numpy.empty((len(escaped), configuration.size, configuration.dimension), dtype=float64)
+            scan(escaped, buffer, generator, parameters)
+            points = filter(buffer.reshape(-1, configuration.dimension), configuration.cut)
+        else:
+            points = numpy.empty((0, configuration.dimension), dtype=float64)
+        initial_cost = None
+        if costs is not None:
+            out = numpy.zeros(configuration.ndirections, dtype=numpy.int64)
+            scan(xb, out, cost, parameters)
+            cn = int(configuration.size*numpy.sum((rb/configuration.dr) - 1))
+            cm = int(2*numpy.sum(out))
+            initial_cost = [cn, cm]
+        if verbose:
+            print(ds.shape)
+            print(escaped.shape)
+            print(points.shape)
+            print()
+        domains = []
+        for cell in configuration.cells:
+            domain = Domain(configuration.lb, configuration.ub, cell)
+            domain.update(points)
+            domains.append(domain)
+            if verbose:
+                print((domain.size, domain.total))
+        if verbose and domains:
+            print()
+        if container is not None:
+            container.update(points)
+        local_data = []
+        local_cost = [] if costs is not None else None
+        local_rads = []
+        while domains:
+            domain = domains[0]
+            if domain.size == 0:
+                cells.append(domains.pop(0))
+                table.append(list(local_data))
+                rads.append(list(local_rads))
+                if costs is not None:
+                    costs.append([*initial_cost, list(local_cost)])
+                continue
+            cell = domain.cell
+            for pair in pairs:
+                ds, _ = rays(domain.dimension, *pair)
+                for i in range(configuration.nrounds):
+                    indices, centers, probabilities, statistics = select(
+                        domain,
+                        configuration.nsamples,
+                        bins_plane=configuration.bins_plane,
+                        bins_phase=configuration.bins_phase,
+                        threshold=configuration.phase_threshold,
+                        alpha_plane=configuration.alpha_plane,
+                        alpha_phase=configuration.alpha_phase,
+                        boost=configuration.boost,
+                        delta=configuration.delta,
+                        uniform=configuration.uniform,
+                        power=configuration.power,
+                    )
+                    initial = sample(configuration.npoints, configuration.scale*cell, centers)
+                    values = numpy.zeros(len(initial), dtype=float64)
+                    scan(initial, values, metric, parameters)
+                    escaped = initial[values > threshold]
+                    if len(escaped):
+                        buffer = numpy.empty((len(escaped), configuration.size, configuration.dimension), dtype=float64)
+                        scan(escaped, buffer, generator, parameters)
+                        points = filter(buffer.reshape(-1, configuration.dimension), configuration.cut)
+                    else:
+                        points = numpy.empty((0, configuration.dimension), dtype=float64)
+                    for item in domains:
+                        item.update(points)
+                    if container is not None:
+                        container.update(points)
+                    domain = domains[0]
+                    keys, rs, xs = domain.boundary(*pair, configuration.center, ds)
+                    rs = rs[keys != -1]
+                    xs = xs[keys != -1]
+                    flag = int(numpy.sum(keys == -1))
+                    radius = 0.0 if len(rs) == 0 else float(numpy.mean(rs**configuration.dimension)**(1/configuration.dimension))
+                    boundary = Domain(configuration.lb, configuration.ub, cell)
+                    keys = numpy.unique(keys[keys != -1])
+                    boundary.insert(keys)
+                    domains = [boundary] + domains[1:]
+                    domain = domains[0]
+                    local_data.append(numpy.asarray([flag, domain.size, len(ds)]))
+                    local_rads.append(radius)
+                    if local_cost is not None:
+                        out = numpy.zeros(len(initial), dtype=numpy.int64)
+                        scan(initial, out, cost, parameters)
+                        local_cost.append(out)
+                    if verbose:
+                        total = 0 if container is None else container.size
+                        print(f'{i + 1:02d}', f'{domain.size:12d}', f'{flag:12d}', f'{100*flag/len(ds):12.2f}', f'{total:12d}', radius)
+                    if flag <= (1.0 - configuration.termination)*len(ds):
+                        break
+            if verbose:
+                print()
+            cells.append(domains.pop(0))
+            table.append(list(local_data))
+            rads.append(list(local_rads))
+            if costs is not None:
+                costs.append([*initial_cost, list(local_cost)])
+    return Result(table, costs, rads, cells, container)
 
 
 __all__ = [
@@ -303,4 +488,5 @@ __all__ = [
     'Configuration',
     'Result',
     'compute',
+    'indicator',
 ]
