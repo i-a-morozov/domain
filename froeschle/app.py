@@ -50,7 +50,7 @@ def render(path: Path, plot_height: int) -> str:
     )
     html, count = GRAPH_DIV_PATTERN.subn(rf'\1height:{plot_height}px; width:100%;\3', html, count=1)
     if count == 0:
-        html = LAYOUT_SIZE_PATTERN.sub(f'"width": 900, "height": {plot_height}', html, count=1)
+        html = LAYOUT_SIZE_PATTERN.sub(f'"width": 1800, "height": {plot_height}', html, count=1)
     return html
 
 
@@ -82,6 +82,6 @@ with st.sidebar:
 path = table[st.session_state.plot_name]
 st.caption(f"Showing `{path.name}`")
 
-plot_height = 800
+plot_height = 1600
 html = render(path, plot_height)
 components.html(html, height=plot_height, scrolling=True)
