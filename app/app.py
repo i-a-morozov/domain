@@ -22,7 +22,8 @@ PLOT_LABELS = {
     "py": "py=0",
 }
 
-GRAPH_DIV_PATTERN = re.compile(r'(<div id="[^"]+" class="plotly-graph-div" style=")height:100%; width:100%;("></div>)')
+GRAPH_DIV_PATTERN = re.compile(r'(<div id="[^"]+" class="plotly-graph-div" style=")(.*?)("></div>)')
+LAYOUT_SIZE_PATTERN = re.compile(r'"width":\s*\d+,\s*"height":\s*\d+')
 
 
 def locate() -> dict[int, dict[str, Path]]:
@@ -52,13 +53,15 @@ def render(path: Path, plot_height: int) -> str:
         (
             "<head><meta charset=\"utf-8\" />"
             "<style>html, body { margin: 0; height: 100%; } "
-            ".plotly-graph-div { min-height: 100%; }</style></head>"
+            "body > div { height: 100%; } "
+            ".js-plotly-plot, .plot-container, .plotly, .plotly-graph-div "
+            f"{{ width: 100% !important; height: {plot_height}px !important; }}</style></head>"
         ),
         1,
     )
-    html, count = GRAPH_DIV_PATTERN.subn(rf"\1height:{plot_height}px; width:100%;\2", html, count=1)
+    html, count = GRAPH_DIV_PATTERN.subn(rf"\1height:{plot_height}px; width:100%;\3", html, count=1)
     if count == 0:
-        st.warning(f"Could not adjust embedded height for {path.name}.")
+        html = LAYOUT_SIZE_PATTERN.sub(f'"width": 1800, "height": {plot_height}', html, count=1)
     return html
 
 
