@@ -4,6 +4,9 @@ Hyperbolic manifold
 
 Hyperbolic-manifold bases, initial conditions, and cloud construction
 
+Mappings act on column batches shaped ``(dimension, count)``. Scalar-state
+mappings must be adapted with :func:`domain.adapters.vectorize` before use.
+
 """
 from typing import List
 from typing import Literal
@@ -276,11 +279,17 @@ def propagate(
     points:NDArray[float64],
     parameters:NDArray[float64],
 ) -> NDArray[float64]:
-    """ Propagate a set of initial conditions """
+    """
+    Propagate a set of initial conditions
+
+    The input mapping must accept vector states shaped ``(dimension, count)``.
+
+    """
     if not len(points):
         return numpy.empty((0, count, points.shape[1]), dtype=float64)
     generate = chain(count, mapping)
-    return numpy.stack([generate(point, parameters) for point in points])
+    local = numpy.ascontiguousarray(points.T)
+    return generate(local, parameters).transpose(2, 0, 1)
 
 
 def construct(
@@ -313,6 +322,9 @@ def construct(
     initials with the inverse mapping. Complete periodic chains are generated
     before sampling unless ``generate`` is false.
 
+    The forward and inverse mappings must accept vector states shaped
+    ``(dimension, count)``.
+
     Returns
     -------
     NDArray[float64]
@@ -330,7 +342,9 @@ def construct(
     if generate:
         for order in grouped:
             generate_chain = chain(order, forward)
-            grouped[order] = [item for point in grouped[order] for item in generate_chain(point, parameters)]
+            local = numpy.ascontiguousarray(numpy.asarray(grouped[order]).T)
+            chains = generate_chain(local, parameters).transpose(2, 0, 1)
+            grouped[order] = chains.reshape(-1, dimension)
     generator = numpy.random.default_rng(seed)
     unstable = []
     stable = []

@@ -4,6 +4,9 @@ Fixed point
 
 Periodic fixed point search and related functions
 
+Mappings act on column batches shaped ``(dimension, count)``. Scalar-state
+mappings must be adapted with :func:`domain.adapters.vectorize` before use.
+
 """
 from typing import Callable
 from typing import Optional
@@ -18,7 +21,6 @@ import numpy
 
 from numba import njit
 
-from domain.adapters import vectorize
 from domain.cbm import edges
 from domain.cbm import psolve
 from domain.cbm import tiles
@@ -43,9 +45,9 @@ def trajectory(
     length: int
         trajectory length
     mapping: Mapping
-        mapping
+        vector mapping
     state: NDArray[float64]
-        initial state
+        initial states shaped ``(dimension, count)``
     parameters: NDArray[float64]
         additional mapping parameters
     orbit: bool, default=True
@@ -81,7 +83,7 @@ def power(
     order: int
         mapping power
     mapping: Mapping
-        mapping
+        vector mapping
 
     Returns
     -------
@@ -220,7 +222,7 @@ def chain(
     order: int
         prime period
     mapping: Mapping
-        mapping
+        vector mapping
 
     Returns
     -------
@@ -248,7 +250,7 @@ def prime(
     Parameters
     ----------
     mapping: Mapping
-        mapping
+        vector mapping
     order: int, default=1
         fixed-point order
     rtol: float, default=1.0E-12
@@ -266,13 +268,14 @@ def prime(
         point:NDArray[float64],
         parameters:NDArray[float64],
     ) -> bool:
-        orbit = generate(point, parameters)
+        local = numpy.ascontiguousarray(point.reshape(-1, 1))
+        orbit = generate(local, parameters)
         close = numpy.isclose(
             orbit,
-            point,
+            local,
             rtol=rtol,
             atol=atol,
-        ).all(axis=-1)
+        ).all(axis=1)
         return bool(numpy.sum(close) == 1)
     return closure
 
@@ -292,7 +295,7 @@ def exact(
     order: int
         fixed-point order
     mapping: Mapping
-        mapping
+        vector mapping
     points: NDArray[float64]
         candidate points
     parameters: NDArray[float64]
@@ -307,13 +310,19 @@ def exact(
 
     """
     points = numpy.asarray(points, dtype=float64)
-    test = prime(
-        mapping,
-        order=order,
-        rtol=tolerance,
-        atol=tolerance,
-    )
-    return numpy.asarray([test(point, parameters) for point in points], dtype=bool_)
+    if not len(points):
+        return numpy.empty(0, dtype=bool_)
+    local = numpy.ascontiguousarray(points.T)
+    orbits = trajectory(order, mapping, local, parameters).transpose(2, 0, 1)
+    counts = numpy.empty(len(points), dtype=int64)
+    for i in range(len(points)):
+        counts[i] = numpy.isclose(
+            orbits[i],
+            points[i],
+            rtol=tolerance,
+            atol=tolerance,
+        ).all(axis=-1).sum()
+    return counts == 1
 
 
 def canonize(
@@ -373,7 +382,7 @@ def unique(
     order: int
         fixed-point order
     mapping: Mapping
-        mapping
+        vector mapping
     points: NDArray[float64]
         fixed points
     parameters: NDArray[float64]
@@ -392,8 +401,12 @@ def unique(
     points = numpy.asarray(points, dtype=float64)
     if not len(points):
         return numpy.empty(0, dtype=bool_)
-    generate = chain(order, mapping)
-    starts = numpy.stack([canonize(generate(point, parameters), tolerance=tolerance, reverse=reverse).reshape(-1) for point in points])
+    local = numpy.ascontiguousarray(points.T)
+    chains = trajectory(order, mapping, local, parameters).transpose(2, 0, 1)
+    starts = numpy.stack([
+        canonize(chain, tolerance=tolerance, reverse=reverse).reshape(-1)
+        for chain in chains
+    ])
     keep = numpy.ones(len(starts), dtype=bool_)
     threshold = tolerance*tolerance
     for i in range(len(starts)):
@@ -421,7 +434,6 @@ def search(
     max_iterations:int=128,
     max_expansions:int=16,
     reverse:bool=True,
-    parallel:bool=False,
     roots:Optional[NDArray[float64]]=None,
     powers:Optional[NDArray[int64]]=None,
     alpha:float=1.0E-4,
@@ -435,7 +447,7 @@ def search(
     order: int
         fixed-point order
     mapping: Mapping
-        scalar-state Domain mapping
+        vector mapping
     bounds: NDArray[float64]
         bounds shaped ``(dimension, 2)``
     pieces: NDArray[int64]
@@ -460,8 +472,6 @@ def search(
         maximum initial-polyhedron expansions
     reverse: bool, default=True
         flag to identify reversed chains
-    parallel: bool, default=False
-        vector mapping parallel-evaluation flag
     roots: Optional[NDArray[float64]], default=None
         known roots to deflate
     powers: Optional[NDArray[int64]], default=None
@@ -479,9 +489,8 @@ def search(
     """
     bounds = numpy.asarray(bounds, dtype=float64)
     pieces = numpy.asarray(pieces, dtype=int64)
-    vector = vectorize(mapping, parallel=parallel)
     residual = problem(
-        vector,
+        mapping,
         order=order,
         roots=roots,
         powers=powers,
@@ -510,20 +519,87 @@ def search(
     return points[unique(order, mapping, points, parameters, tolerance=duplicate, reverse=reverse)]
 
 
+def symplectic_identity(
+    dimension:int,
+) -> NDArray[float64]:
+    """
+    Generate a symplectic identity matrix
+
+    Canonical coordinates are ordered with all positions followed by all
+    momenta, as ``(q1, ..., qN, p1, ..., pN)``.
+
+    Parameters
+    ----------
+    dimension: int
+        configuration-space dimension
+
+    Returns
+    -------
+    NDArray[float64]
+        symplectic identity matrix
+
+    """
+    if dimension < 1:
+        raise ValueError("dimension must be positive")
+    identity = numpy.eye(dimension, dtype=float64)
+    matrix = numpy.zeros((2*dimension, 2*dimension), dtype=float64)
+    matrix[:dimension, dimension:] = identity
+    matrix[dimension:, :dimension] = -identity
+    return matrix
+
+
+def symplectify(
+    matrix:NDArray[float64],
+) -> NDArray[float64]:
+    """
+    Symplectify an even-dimensional square matrix
+
+    The matrix is projected onto the symplectic group using a symmetrized
+    Cayley transform. Canonical coordinates are ordered with all positions
+    followed by all momenta.
+
+    Parameters
+    ----------
+    matrix: NDArray[float64]
+        input matrix
+
+    Returns
+    -------
+    NDArray[float64]
+        symplectified matrix
+
+    """
+    matrix = numpy.asarray(matrix, dtype=float64)
+    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+        raise ValueError("matrix must be square")
+    size = len(matrix)
+    if size == 0 or size % 2:
+        raise ValueError("matrix dimension must be positive and even")
+    identity = numpy.eye(size, dtype=float64)
+    symplectic = symplectic_identity(size//2)
+    cayley = symplectic @ (identity - matrix)
+    cayley = numpy.linalg.solve((identity + matrix).T, cayley.T).T
+    symmetric = 0.5*(cayley + cayley.T)
+    return numpy.linalg.solve(
+        symplectic + symmetric,
+        symplectic - symmetric,
+    )
+
+
 def monodromy(
     order:int,
     mapping:Mapping,
     difference:float=1.0E-6,
 ) -> Mapping:
     """
-    Generate a finite-difference monodromy-matrix callable.
+    Generate a symplectified finite-difference monodromy-matrix callable
 
     Parameters
     ----------
     order: int
         fixed-point order
     mapping: Mapping
-        mapping
+        vector mapping
     difference: float, default=1.0E-6
         central finite-difference step
 
@@ -538,14 +614,14 @@ def monodromy(
         parameters:NDArray[float64],
     ) -> NDArray[float64]:
         point = numpy.asarray(point, dtype=float64)
-        dimension = len(point)
-        matrix = numpy.empty((dimension, dimension), dtype=float64)
-        for i in range(dimension):
-            step = difference*max(1.0, abs(point[i]))
-            delta = numpy.zeros(dimension, dtype=float64)
-            delta[i] = step
-            matrix[:, i] = (fixed(point + delta, parameters) - fixed(point - delta, parameters))/(2.0*step)
-        return matrix
+        steps = difference*numpy.maximum(1.0, numpy.abs(point))
+        delta = numpy.diag(steps)
+        positive = numpy.ascontiguousarray(point[:, None] + delta)
+        negative = numpy.ascontiguousarray(point[:, None] - delta)
+        upper = fixed(positive, parameters)
+        lower = fixed(negative, parameters)
+        matrix = (upper - lower)/(2.0*steps[None, :])
+        return symplectify(matrix)
     return closure
 
 
