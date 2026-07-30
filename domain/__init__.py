@@ -25,6 +25,7 @@ from domain.scan import orbit
 from domain.scan import scan
 from domain.volume import directions
 from domain.volume import rays
+from domain.volume import mean
 
 __version__ = '0.1.1'
 
@@ -280,7 +281,7 @@ def compute(
                     rs = rs[keys != -1]
                     xs = xs[keys != -1]
                     flag = int(numpy.sum(keys == -1))
-                    radius = 0.0 if len(rs) == 0 else float(numpy.mean(rs**configuration.dimension)**(1/configuration.dimension))
+                    radius = 0.0 if len(rs) == 0 else float(mean(configuration.dimension, rs))
                     boundary = Domain(configuration.lb, configuration.ub, cell)
                     keys = numpy.unique(keys[keys != -1])
                     boundary.insert(keys)
@@ -455,7 +456,7 @@ def indicator(
                     rs = rs[keys != -1]
                     xs = xs[keys != -1]
                     flag = int(numpy.sum(keys == -1))
-                    radius = 0.0 if len(rs) == 0 else float(numpy.mean(rs**configuration.dimension)**(1/configuration.dimension))
+                    radius = 0.0 if len(rs) == 0 else float(mean(configuration.dimension, rs))
                     boundary = Domain(configuration.lb, configuration.ub, cell)
                     keys = numpy.unique(keys[keys != -1])
                     boundary.insert(keys)

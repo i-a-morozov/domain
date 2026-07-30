@@ -207,3 +207,57 @@ def volume(
     unit = scale/(factor*k)
     radius = (integral/area)**(1.0/dimension)
     return radius, unit*(integral/area)
+
+
+@njit
+def mean(
+    dimension:int,
+    radii:NDArray[float64],
+    factor:float=3.0,
+    winsorize:bool=True,
+) -> float64:
+    """
+    Compute the Hölder (power) mean
+
+    Parameters
+    ----------
+    dimension: int
+        phase-space dimension
+    radii: NDArray[float64]
+        radii
+    factor: float, default=3.0
+        number of robust scale estimates above the log-median
+    winsorize: bool, default=True
+        flag to apply upper-tail winsorization
+
+    Returns
+    -------
+    float64
+
+    """
+    positive = 0
+    maximum = 0.0
+    for radius in radii:
+        if radius > 0.0:
+            positive += 1
+        if radius > maximum:
+            maximum = radius
+    threshold = maximum
+    if winsorize and positive:
+        logarithms = numpy.empty(positive, dtype=float64)
+        index = 0
+        for radius in radii:
+            if radius > 0.0:
+                logarithms[index] = numpy.log(radius)
+                index += 1
+        median = numpy.median(logarithms)
+        scale = 1.5*numpy.median(numpy.abs(logarithms - median))
+        threshold = numpy.exp(median + factor*scale)
+        maximum = numpy.minimum(maximum, threshold)
+    if maximum == 0.0:
+        return float64(0.0)
+    total = 0.0
+    for radius in radii:
+        value = numpy.minimum(radius, threshold)
+        total += (value/maximum)**dimension
+    return maximum*(total/radii.size)**(1.0/dimension)
