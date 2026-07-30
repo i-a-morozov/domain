@@ -539,8 +539,6 @@ def symplectic_identity(
         symplectic identity matrix
 
     """
-    if dimension < 1:
-        raise ValueError("dimension must be positive")
     identity = numpy.eye(dimension, dtype=float64)
     matrix = numpy.zeros((2*dimension, 2*dimension), dtype=float64)
     matrix[:dimension, dimension:] = identity
@@ -570,20 +568,13 @@ def symplectify(
 
     """
     matrix = numpy.asarray(matrix, dtype=float64)
-    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
-        raise ValueError("matrix must be square")
     size = len(matrix)
-    if size == 0 or size % 2:
-        raise ValueError("matrix dimension must be positive and even")
     identity = numpy.eye(size, dtype=float64)
     symplectic = symplectic_identity(size//2)
     cayley = symplectic @ (identity - matrix)
     cayley = numpy.linalg.solve((identity + matrix).T, cayley.T).T
     symmetric = 0.5*(cayley + cayley.T)
-    return numpy.linalg.solve(
-        symplectic + symmetric,
-        symplectic - symmetric,
-    )
+    return numpy.linalg.solve(symplectic + symmetric, symplectic - symmetric)
 
 
 def monodromy(
@@ -718,7 +709,7 @@ def manifold(
     tolerance:float=1.0E-9,
 ) -> NDArray[bool_]:
     """
-    Select stable eigenvalues
+    Select unit-circle eigenvalues
 
     Parameters
     ----------

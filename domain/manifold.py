@@ -300,6 +300,8 @@ def construct(
     parameters:NDArray[float64],
     seed:Optional[int]=None,
     generate:bool=True,
+    stable:bool=True,
+    unstable:bool=True,
     scale:float=1.0E-3,
     nline:int=8,
     nball:int=16,
@@ -314,28 +316,40 @@ def construct(
     difference:float=1.0E-6,
     tolerance:float=1.0E-9,
     surface:bool=False,
-) -> NDArray[float64]:
+) -> Tuple[NDArray[float64], NDArray[float64]]:
     """
-    Build an enclosing cloud from hyperbolic fixed-point manifolds
+    Construct stable and unstable hyperbolic-manifold clouds
 
     Unstable initials are propagated with the forward mapping and stable
     initials with the inverse mapping. Complete periodic chains are generated
     before sampling unless ``generate`` is false.
 
     The forward and inverse mappings must accept vector states shaped
-    ``(dimension, count)``.
+    ``(dimension, count)``. Reduction is applied independently to each output
+    cloud, and ``total`` is the maximum retained by each cloud.
+
+    Parameters
+    ----------
+    stable: bool, default=True
+        flag to construct the stable-manifold cloud
+    unstable: bool, default=True
+        flag to construct the unstable-manifold cloud
 
     Returns
     -------
-    NDArray[float64]
-        manifold cloud
+    Tuple[NDArray[float64], NDArray[float64]]
+        stable and unstable manifold clouds
 
     """
     points = numpy.asarray(points, dtype=float64)
     if not len(points):
         dimension = points.shape[1] if points.ndim == 2 else 0
-        return numpy.empty((0, dimension), dtype=float64)
+        empty = numpy.empty((0, dimension), dtype=float64)
+        return empty, numpy.copy(empty)
     dimension = points.shape[1]
+    if not stable and not unstable:
+        empty = numpy.empty((0, dimension), dtype=float64)
+        return empty, numpy.copy(empty)
     grouped = {}
     for order, point in zip(orders, points):
         grouped.setdefault(order, []).append(point)
@@ -346,29 +360,34 @@ def construct(
             chains = generate_chain(local, parameters).transpose(2, 0, 1)
             grouped[order] = chains.reshape(-1, dimension)
     generator = numpy.random.default_rng(seed)
-    unstable = []
-    stable = []
+    unstable_samples = []
+    stable_samples = []
     for order, local in grouped.items():
         matrix = monodromy(order, forward, difference=difference)
         for point in local:
             values, vectors = numpy.linalg.eig(matrix(point, parameters))
             values, vectors = combine(values, vectors, tolerance=tolerance)
-            unstable_basis = basis(values, vectors, "U", tolerance=tolerance)
-            stable_basis = basis(values, vectors, "S", tolerance=tolerance)
-            ss, su = generator.integers(0, numpy.iinfo(int64).max, size=2)
-            unstable.append(sample( point, unstable_basis, scale, nline, nball, seed=int(ss), surface=surface))
-            stable.append(sample(point, stable_basis, scale, nline, nball, seed=int(su), surface=surface))
-    unstable = [value for value in unstable if len(value)]
-    stable = [value for value in stable if len(value)]
-    unstable_points = (numpy.concatenate(unstable) if unstable else numpy.empty((0, dimension), dtype=float64))
-    stable_points = (numpy.concatenate(stable) if stable else numpy.empty((0, dimension), dtype=float64))
-    forward_orbits = propagate(count, forward, unstable_points, parameters)
-    inverse_orbits = propagate(count, inverse, stable_points, parameters)
-    forward_orbits = forward_orbits[mask(forward_orbits, cut, radius, strict=strict)]
-    inverse_orbits = inverse_orbits[mask(inverse_orbits, cut, radius, strict=strict)]
-    cloud = numpy.concatenate([forward_orbits.reshape(-1, dimension), inverse_orbits.reshape(-1, dimension)])
-    cloud = cloud[numpy.isfinite(cloud).all(axis=1)]
-    cloud = cloud[numpy.linalg.norm(cloud, axis=1) < radius]
-    if reduce:
-        cloud = downsample(cloud, size=size, total=total, shuffle=shuffle, seed=seed)
-    return cloud
+            unstable_seed, stable_seed = generator.integers(0, numpy.iinfo(int64).max, size=2)
+            if unstable:
+                unstable_basis = basis(values, vectors, "U", tolerance=tolerance)
+                unstable_samples.append(sample(point, unstable_basis, scale, nline, nball, seed=int(unstable_seed), surface=surface))
+            if stable:
+                stable_basis = basis(values, vectors, "S", tolerance=tolerance)
+                stable_samples.append(sample(point, stable_basis, scale, nline, nball, seed=int(stable_seed), surface=surface))
+    unstable_samples = [value for value in unstable_samples if len(value)]
+    stable_samples = [value for value in stable_samples if len(value)]
+    unstable_points = (numpy.concatenate(unstable_samples) if unstable_samples else numpy.empty((0, dimension), dtype=float64))
+    stable_points = (numpy.concatenate(stable_samples) if stable_samples else numpy.empty((0, dimension), dtype=float64))
+    unstable_orbits = propagate(count, forward, unstable_points, parameters)
+    stable_orbits = propagate(count, inverse, stable_points, parameters)
+    def finalize(orbits:NDArray[float64]) -> NDArray[float64]:
+        if not len(orbits):
+            return numpy.empty((0, dimension), dtype=float64)
+        orbits = orbits[mask(orbits, cut, radius, strict=strict)]
+        cloud = orbits.reshape(-1, dimension)
+        cloud = cloud[numpy.isfinite(cloud).all(axis=1)]
+        cloud = cloud[numpy.linalg.norm(cloud, axis=1) < radius]
+        if reduce:
+            cloud = downsample(cloud, size=size, total=total, shuffle=shuffle, seed=seed)
+        return cloud
+    return finalize(stable_orbits), finalize(unstable_orbits)
