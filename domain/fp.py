@@ -100,6 +100,36 @@ def power(
     return closure
 
 
+def expand(
+    mapping: Callable[[NDArray[numpy.float64], NDArray[numpy.float64]], NDArray[numpy.float64]]
+) -> Callable[[NDArray[numpy.float64], NDArray[numpy.float64]], NDArray[numpy.float64]]:
+    """
+    Expand mapping to get order as the last parameter
+
+    Parameters
+    ----------
+    mapping: Callable[[NDArray[numpy.float64], NDArray[numpy.float64]], NDArray[numpy.float64]]
+        input mapping
+
+    Returns
+    -------
+    Callable[[NDArray[numpy.float64], NDArray[numpy.float64]], NDArray[numpy.float64]]
+        expanded mapping
+
+    """
+    @njit
+    def closure(
+        state: NDArray[numpy.float64],
+        parameters: NDArray[numpy.float64]
+    ) -> NDArray[numpy.float64]:
+        order = int(numpy.round(parameters[-1]))
+        knobs = parameters[:-1]
+        local = state
+        for _ in range(order):
+            local = mapping(local, knobs)
+        return local
+    return closure
+
 def problem(
     mapping:Mapping,
     order:int=1,
