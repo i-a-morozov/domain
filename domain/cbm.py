@@ -22,7 +22,7 @@ from numba import prange
 from numba.typed import List as NDList
 
 
-@njit(cache=True)
+@njit(cache=False)
 def solve(
     edges: NDArray[np.int64],
     bounds: NDArray[np.float64],
@@ -84,7 +84,7 @@ def solve(
     return test, point, iterations
 
 
-@njit(parallel=True, cache=True)
+@njit(parallel=True, cache=False)
 def psolve(
     edges: NDArray[np.int64],
     tiles: NDArray[np.float64],

@@ -4,8 +4,6 @@ Fixed point
 
 Periodic fixed point search and related functions
 
-Mappings act on column batches shaped ``(dimension, count)``. Scalar-state
-mappings must be adapted with :func:`domain.adapters.vectorize` before use.
 
 """
 from typing import Callable
@@ -704,7 +702,7 @@ def identify(
     return "-".join(kinds)
 
 
-def manifold(
+def unit(
     values:NDArray[complex128],
     tolerance:float=1.0E-9,
 ) -> NDArray[bool_]:
@@ -721,7 +719,7 @@ def manifold(
     Returns
     -------
     NDArray[bool_]
-        stable eigenvalue mask
+        unit-circle eigenvalue mask
 
     """
     return numpy.abs(values) - 1.0 < tolerance

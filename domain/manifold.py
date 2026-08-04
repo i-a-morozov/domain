@@ -4,9 +4,6 @@ Hyperbolic manifold
 
 Hyperbolic-manifold bases, initial conditions, and cloud construction
 
-Mappings act on column batches shaped ``(dimension, count)``. Scalar-state
-mappings must be adapted with :func:`domain.adapters.vectorize` before use.
-
 """
 from typing import List
 from typing import Literal
@@ -25,8 +22,8 @@ from domain.fp import chain
 from domain.fp import classify
 from domain.fp import combine
 from domain.fp import identify
-from domain.fp import manifold
 from domain.fp import monodromy
+from domain.fp import unit
 
 
 def basis(
@@ -58,7 +55,7 @@ def basis(
     """
     dimension = values.size
     elliptic = classify(values, tolerance=tolerance)
-    stable = manifold(values, tolerance=tolerance)
+    stable = unit(values, tolerance=tolerance)
     select = stable[:, 0].astype(int64)^int(direction == "S")
     columns = numpy.take_along_axis(
         vectors,
@@ -79,7 +76,28 @@ def sample_line(
     count:int,
     seed:Optional[int]=None,
 ) -> NDArray[float64]:
-    """ Sample a one-dimensional manifold line """
+    """
+    Sample a one-dimensional manifold line
+
+    Parameters
+    ----------
+    point: NDArray[float64]
+        fixed point
+    vectors: NDArray[float64]
+        one-dimensional orthonormal subspace basis
+    scale: float
+        line half-length
+    count: int
+        number of points
+    seed: Optional[int], default=None
+        random seed
+
+    Returns
+    -------
+    NDArray[float64]
+        points sampled along the line
+
+    """
     generator = numpy.random.default_rng(seed)
     values = generator.uniform(-1.0, 1.0, size=count)
     return point[None, :] + scale*values[:, None]*vectors[:, 0][None, :]
@@ -141,6 +159,28 @@ def sample(
     """
     Sample initials in a hyperbolic-manifold subspace
 
+    Parameters
+    ----------
+    point: NDArray[float64]
+        fixed point
+    vectors: NDArray[float64]
+        orthonormal subspace basis stored in columns
+    scale: float, default=1.0E-3
+        line half-length or ball radius
+    nline: int, default=2**8
+        number of points for a one-dimensional subspace
+    nball: int, default=2**8
+        number of points for a higher-dimensional subspace
+    seed: Optional[int], default=None
+        random seed
+    surface: bool, default=False
+        flag to sample the bounding sphere of a higher-dimensional subspace
+
+    Returns
+    -------
+    NDArray[float64]
+        sampled initial conditions
+
     """
     dimension, size = vectors.shape
     if size == 0:
@@ -170,6 +210,25 @@ def initials(
     """
     Classify a fixed point and generate stable and unstable initials
 
+    Parameters
+    ----------
+    point: NDArray[float64]
+        fixed point
+    matrix: NDArray[float64]
+        monodromy matrix evaluated at the fixed point
+    scale: float, default=1.0E-3
+        line half-length or ball radius
+    nline: int, default=2**8
+        number of points for a one-dimensional manifold
+    nball: int, default=2**8
+        number of points for a higher-dimensional manifold
+    tolerance: float, default=1.0E-9
+        eigenvalue comparison tolerance
+    seed: Optional[int], default=None
+        random seed
+    surface: bool, default=False
+        flag to sample bounding spheres instead of solid balls
+
     Returns
     -------
     Tuple[str, NDArray[float64], NDArray[float64]]
@@ -196,7 +255,28 @@ def downsample(
     shuffle:bool=False,
     seed:Optional[int]=None,
 ) -> NDArray[float64]:
-    """ Downsample a cloud by retaining one point per Cartesian cell """
+    """
+    Downsample a cloud by retaining one point per Cartesian cell
+
+    Parameters
+    ----------
+    cloud: NDArray[float64]
+        point cloud shaped ``(count, dimension)``
+    size: float, default=1.0E-3
+        Cartesian cell size
+    total: Optional[int], default=None
+        maximum number of retained points
+    shuffle: bool, default=False
+        flag to randomize point selection within occupied cells
+    seed: Optional[int], default=None
+        random seed
+
+    Returns
+    -------
+    NDArray[float64]
+        downsampled point cloud
+
+    """
     if not len(cloud):
         return cloud
     keys = numpy.floor(cloud/size).astype(int64)
@@ -226,7 +306,26 @@ def perturbation(
     cloud:NDArray[float64],
     seed:Optional[int]=None,
 ) -> NDArray[float64]:
-    """ Perturb every cloud point inside a full-dimensional ball """
+    """
+    Perturb every cloud point inside a full-dimensional ball
+
+    Parameters
+    ----------
+    count: int
+        number of perturbations per cloud point
+    radius: float
+        perturbation-ball radius
+    cloud: NDArray[float64]
+        point cloud shaped ``(length, dimension)``
+    seed: Optional[int], default=None
+        random seed
+
+    Returns
+    -------
+    NDArray[float64]
+        perturbed point cloud shaped ``(length*count, dimension)``
+
+    """
     length, dimension = cloud.shape
     if not length:
         return numpy.empty((0, dimension), dtype=float64)
@@ -284,6 +383,22 @@ def propagate(
 
     The input mapping must accept vector states shaped ``(dimension, count)``.
 
+    Parameters
+    ----------
+    count: int
+        number of mapping iterations to generate
+    mapping: Mapping
+        vectorized phase-space mapping
+    points: NDArray[float64]
+        initial conditions shaped ``(number, dimension)``
+    parameters: NDArray[float64]
+        mapping parameters
+
+    Returns
+    -------
+    NDArray[float64]
+        orbits shaped ``(number, count, dimension)``
+
     """
     if not len(points):
         return numpy.empty((0, count, points.shape[1]), dtype=float64)
@@ -299,7 +414,7 @@ def construct(
     inverse:Mapping,
     parameters:NDArray[float64],
     seed:Optional[int]=None,
-    generate:bool=True,
+    generate:bool=False,
     stable:bool=True,
     unstable:bool=True,
     scale:float=1.0E-3,
@@ -308,8 +423,9 @@ def construct(
     cut:int=4096,
     count:int=8192,
     radius:float=1.0,
-    strict:bool=True,
-    reduce:bool=True,
+    strict:bool=False,
+    full:bool=False,
+    reduce:bool=False,
     size:float=1.0E-3,
     total:int=10**9,
     shuffle:bool=False,
@@ -322,18 +438,62 @@ def construct(
 
     Unstable initials are propagated with the forward mapping and stable
     initials with the inverse mapping. Complete periodic chains are generated
-    before sampling unless ``generate`` is false.
+    before sampling unless ``generate`` is false
 
     The forward and inverse mappings must accept vector states shaped
     ``(dimension, count)``. Reduction is applied independently to each output
-    cloud, and ``total`` is the maximum retained by each cloud.
+    cloud, and ``total`` is the maximum retained by each cloud
 
     Parameters
     ----------
+    orders: List[int]
+        period associated with each input point
+    points: NDArray[float64]
+        periodic-chain representatives shaped ``(number, dimension)``
+    forward: Mapping
+        vectorized forward phase-space mapping
+    inverse: Mapping
+        vectorized inverse phase-space mapping
+    parameters: NDArray[float64]
+        mapping parameters
+    seed: Optional[int], default=None
+        random seed
+    generate: bool, default=False
+        flag to generate complete periodic chains from the input representatives
     stable: bool, default=True
         flag to construct the stable-manifold cloud
     unstable: bool, default=True
         flag to construct the unstable-manifold cloud
+    scale: float, default=1.0E-3
+        initial line half-length or ball radius
+    nline: int, default=8
+        number of initials for each one-dimensional manifold
+    nball: int, default=16
+        number of initials for each higher-dimensional manifold
+    cut: int, default=4096
+        iteration after which an orbit must escape
+    count: int, default=8192
+        number of mapping iterations to generate per initial condition
+    radius: float, default=1.0
+        escape radius and output-cloud radial bound
+    strict: bool, default=False
+        flag to exclude orbits escaping before ``cut``
+    full: bool, default=False
+        flag to also retain orbits that do not escape before ``count``
+    reduce: bool, default=False
+        flag to downsample each output cloud
+    size: float, default=1.0E-3
+        Cartesian cell size used for downsampling
+    total: int, default=10**9
+        maximum number of points retained in each output cloud
+    shuffle: bool, default=False
+        flag to randomize point selection during downsampling
+    difference: float, default=1.0E-6
+        finite-difference step used to compute monodromy matrices
+    tolerance: float, default=1.0E-9
+        eigenvalue comparison tolerance
+    surface: bool, default=False
+        flag to sample bounding spheres instead of solid balls
 
     Returns
     -------
@@ -383,10 +543,17 @@ def construct(
     def finalize(orbits:NDArray[float64]) -> NDArray[float64]:
         if not len(orbits):
             return numpy.empty((0, dimension), dtype=float64)
-        orbits = orbits[mask(orbits, cut, radius, strict=strict)]
-        cloud = orbits.reshape(-1, dimension)
-        cloud = cloud[numpy.isfinite(cloud).all(axis=1)]
-        cloud = cloud[numpy.linalg.norm(cloud, axis=1) < radius]
+        with numpy.errstate(over="ignore", invalid="ignore"):
+            selected = mask(orbits, cut, radius, strict=strict)
+            if full:
+                finite = numpy.isfinite(orbits).all(axis=(1, 2))
+                square = numpy.sum(orbits*orbits, axis=-1)
+                bounded = numpy.all(square <= radius*radius, axis=1)
+                selected = selected | (finite & bounded)
+            orbits = orbits[selected]
+            cloud = orbits.reshape(-1, dimension)
+            cloud = cloud[numpy.isfinite(cloud).all(axis=1)]
+            cloud = cloud[numpy.linalg.norm(cloud, axis=1) < radius]
         if reduce:
             cloud = downsample(cloud, size=size, total=total, shuffle=shuffle, seed=seed)
         return cloud
