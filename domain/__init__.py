@@ -169,8 +169,10 @@ def collect(
     parameters:NDArray[float64],
     configuration:Configuration,
     escaping:bool=False,
+    cut:Optional[float]=None,
 ) -> NDArray[float64]:
     """ Collect filtered orbit points while bounding the full-orbit buffer """
+    radius = configuration.cut if cut is None else float(cut)
     chunks = []
     for start in range(0, len(initial), configuration.batch):
         local = numpy.ascontiguousarray(initial[start:start + configuration.batch])
@@ -179,12 +181,135 @@ def collect(
         if escaping:
             buffer = buffer[mask(buffer, configuration.threshold)]
         if len(buffer):
-            points = filter(buffer.reshape(-1, configuration.dimension), configuration.cut)
+            points = filter(buffer.reshape(-1, configuration.dimension), radius)
             if len(points):
                 chunks.append(points)
     if not chunks:
         return numpy.empty((0, configuration.dimension), dtype=float64)
     return numpy.vstack(chunks)
+
+
+def grow(
+    configuration:Configuration,
+    parameters:NDArray[float64],
+    mapping:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]],
+    domain:Domain,
+    epochs:int=64,
+    limit:int=64_000_000,
+    verbose:bool=True
+) -> Domain:
+    """
+    Grow an escape-based transport domain
+
+    Parameters
+    ----------
+    configuration: Configuration
+        sampling, orbit, escape, and batching parameters
+    parameters: NDArray[float64]
+        additional parameters passed to ``mapping``
+    mapping: Callable
+        forward or inverse state mapping
+    domain: Domain
+        seeded domain to update in place
+    epochs: int, default=64
+        maximum number of growth epochs
+    limit: int, default=64_000_000
+        stop once the number of marked cells exceeds this value
+    verbose: bool, default=True
+        print the epoch and current domain size
+
+    Returns
+    -------
+    Domain
+
+    """
+    generator = orbit(configuration.size, configuration.threshold, mapping)
+    for epoch in range(epochs):
+        if domain.size == 0:
+            break
+        indices = numpy.random.choice(domain.list, configuration.nsamples)
+        centers = domain.transform(indices)
+        initial = sample(configuration.npoints, configuration.scale*domain.cell, centers)
+        for start in range(0, len(initial), configuration.batch):
+            local = numpy.ascontiguousarray(initial[start:start + configuration.batch])
+            points = collect(local, generator, parameters, configuration, escaping=True, cut=configuration.threshold)
+            domain.update(points)
+        if verbose:
+            print(f'{epoch + 1:02d}', f'{domain.size:12d}')
+        if domain.size > limit:
+            break
+    return domain
+
+
+def grow_indicator(
+    configuration:Configuration,
+    parameters:NDArray[float64],
+    factory:Callable,
+    forward:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]],
+    inverse:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]],
+    threshold:float,
+    domain:Domain,
+    epochs:int=16,
+    limit:int=128_000_000,
+    verbose:bool=True,
+) -> Domain:
+    """
+    Grow an indicator-based transport domain
+
+    Parameters
+    ----------
+    configuration: Configuration
+        sampling, orbit, radius, and batching parameters
+    parameters: NDArray[float64]
+        additional parameters passed to the mappings and indicators
+    factory: Callable
+        indicator factory called as ``factory(size, forward, inverse)``
+    forward: Callable
+        forward state mapping
+    inverse: Callable
+        inverse state mapping
+    threshold: float
+        indicator selection threshold
+    domain: Domain
+        seeded domain to update in place
+    epochs: int, default=16
+        maximum number of growth epochs
+    limit: int, default=128_000_000
+        stop once the number of marked cells exceeds this value
+    verbose: bool, default=True
+        print the epoch and current domain size
+
+    Returns
+    -------
+    Domain
+
+    """
+    metric_forward_inverse = factory(configuration.size, forward, inverse)
+    metric_inverse_forward = factory(configuration.size, inverse, forward)
+    orbit_forward = orbit(configuration.size, configuration.threshold, forward)
+    orbit_inverse = orbit(configuration.size, configuration.threshold, inverse)
+    for epoch in range(epochs):
+        if domain.size == 0:
+            break
+        indices = numpy.random.choice(domain.list, configuration.nsamples)
+        centers = domain.transform(indices)
+        initial = sample(configuration.npoints, configuration.scale*domain.cell, centers)
+        values_forward_inverse = numpy.empty(len(initial), dtype=float64)
+        values_inverse_forward = numpy.empty(len(initial), dtype=float64)
+        scan(initial, values_forward_inverse, metric_forward_inverse, parameters)
+        scan(initial, values_inverse_forward, metric_inverse_forward, parameters)
+        selected = initial[(values_forward_inverse > threshold) | (values_inverse_forward > threshold)]
+        for start in range(0, len(selected), configuration.batch):
+            local = numpy.ascontiguousarray(selected[start:start + configuration.batch])
+            points = collect(local, orbit_forward, parameters, configuration, cut=configuration.threshold)
+            domain.update(points)
+            points = collect(local, orbit_inverse, parameters, configuration, cut=configuration.threshold)
+            domain.update(points)
+        if verbose:
+            print(f'{epoch + 1:02d}', f'{domain.size:12d}')
+        if domain.size > limit:
+            break
+    return domain
 
 
 def compute(
@@ -342,7 +467,7 @@ def compute(
     return Result(table, costs, rads, cells, container)
 
 
-def indicator(
+def compute_indicator(
     configuration:Configuration,
     parameters:NDArray[float64],
     pairs:List[tuple[int, int]],
@@ -523,6 +648,9 @@ __all__ = [
     'Domain',
     'Configuration',
     'Result',
+    'collect',
     'compute',
-    'indicator',
+    'compute_indicator',
+    'grow',
+    'grow_indicator'
 ]
