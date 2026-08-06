@@ -125,7 +125,7 @@ class Domain:
 
     def update(self, points:NDArray[float64]) -> None:
         keys = self.index(points)
-        self.insert(keys)
+        self.insert(keys[keys >= 0])
 
     @property
     def size(self) -> int:

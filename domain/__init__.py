@@ -27,7 +27,7 @@ from domain.volume import directions
 from domain.volume import rays
 from domain.volume import mean
 
-__version__ = '0.1.1'
+__version__ = '0.1.2'
 
 
 @dataclass
@@ -87,6 +87,8 @@ class Configuration:
         score power
     seed: Optional[int], default=None
         random seed offset for initial random directions
+    batch: int, default=512
+        maximum number of full orbits held in memory at once
 
     """
     lb: NDArray[float64]
@@ -114,11 +116,13 @@ class Configuration:
     uniform: float = 0.05
     power: float = 1.0
     seed: Optional[int] = None
+    batch: int = 512
 
     def __post_init__(self) -> None:
         self.lb = numpy.asarray(self.lb, dtype=float64)
         self.ub = numpy.asarray(self.ub, dtype=float64)
         self.center = numpy.asarray(self.center, dtype=float64)
+        self.batch = int(self.batch)
 
     @property
     def dimension(self) -> int:
@@ -159,6 +163,30 @@ class Result:
     container: Optional[Domain]
 
 
+def collect(
+    initial:NDArray[float64],
+    generator:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]],
+    parameters:NDArray[float64],
+    configuration:Configuration,
+    escaping:bool=False,
+) -> NDArray[float64]:
+    """ Collect filtered orbit points while bounding the full-orbit buffer """
+    chunks = []
+    for start in range(0, len(initial), configuration.batch):
+        local = numpy.ascontiguousarray(initial[start:start + configuration.batch])
+        buffer = numpy.empty((len(local), configuration.size, configuration.dimension), dtype=float64)
+        scan(local, buffer, generator, parameters)
+        if escaping:
+            buffer = buffer[mask(buffer, configuration.threshold)]
+        if len(buffer):
+            points = filter(buffer.reshape(-1, configuration.dimension), configuration.cut)
+            if len(points):
+                chunks.append(points)
+    if not chunks:
+        return numpy.empty((0, configuration.dimension), dtype=float64)
+    return numpy.vstack(chunks)
+
+
 def compute(
     configuration:Configuration,
     parameters:NDArray[float64],
@@ -168,7 +196,8 @@ def compute(
     cost:Optional[Callable[[NDArray[float64], NDArray[float64]], int]]=None,
     full:bool=False,
     complexity:bool=True,
-    verbose:bool=True
+    verbose:bool=True,
+    initial:Optional[NDArray[float64]]=None
 ) -> Result:
     """
     Run domain construction loop
@@ -193,6 +222,8 @@ def compute(
         flag to compute cost data when `cost` is provided
     verbose: bool, default=False
         verbose output flag
+    initial: Optional[NDArray[float64]], default=None
+        points used to seed the domains directly
 
     Returns
     -------
@@ -205,29 +236,34 @@ def compute(
     cells = []
     container = Domain(configuration.lb, configuration.ub, configuration.dl) if full else None
     generator = orbit(configuration.size, configuration.threshold, mapping)
+    seeds = None if initial is None else initial
     for epoch in range(configuration.nepochs):
         if verbose:
             print(epoch)
             print()
-        seed = None if configuration.seed is None else configuration.seed + epoch
-        ds = directions(configuration.dimension, configuration.ndirections, random=True, seed=seed)
-        rb, xb = da(configuration.dimension, configuration.dr, configuration.threshold, configuration.center, ds, objective, parameters, unstable=True)
-        buffer = numpy.zeros((configuration.ndirections, configuration.size, configuration.dimension), dtype=float64)
-        scan(xb, buffer, generator, parameters)
-        initial_cost = None
-        if costs is not None:
-            out = numpy.zeros(configuration.ndirections, dtype=numpy.int64)
-            scan(xb, out, cost, parameters)
-            cn = int(configuration.size*numpy.sum((rb/configuration.dr) - 1))
-            cm = int(2*numpy.sum(out))
-            initial_cost = [cn, cm]
-        points = filter(numpy.vstack(buffer), configuration.cut)
-        if verbose:
-            print(ds.shape)
-            print(numpy.vstack(buffer).shape)
-            print(points.shape)
-            print()
-        buffer = numpy.empty((configuration.nsamples*configuration.npoints, configuration.size, configuration.dimension), dtype=float64)
+        if seeds is None:
+            seed = None if configuration.seed is None else configuration.seed + epoch
+            ds = directions(configuration.dimension, configuration.ndirections, random=True, seed=seed)
+            rb, xb = da(configuration.dimension, configuration.dr, configuration.threshold, configuration.center, ds, objective, parameters, unstable=True)
+            points = collect(xb, generator, parameters, configuration)
+            initial_cost = None
+            if costs is not None:
+                out = numpy.zeros(configuration.ndirections, dtype=numpy.int64)
+                scan(xb, out, cost, parameters)
+                cn = int(configuration.size*numpy.sum((rb/configuration.dr) - 1))
+                cm = int(2*numpy.sum(out))
+                initial_cost = [cn, cm]
+            if verbose:
+                print(ds.shape)
+                print((len(xb)*configuration.size, configuration.dimension))
+                print(points.shape)
+                print()
+        else:
+            points = seeds
+            initial_cost = [0, 0] if costs is not None else None
+            if verbose:
+                print('initial', points.shape)
+                print()
         domains = []
         for cell in configuration.cells:
             domain = Domain(configuration.lb, configuration.ub, cell)
@@ -269,9 +305,7 @@ def compute(
                         power=configuration.power,
                     )
                     initial = sample(configuration.npoints, configuration.scale*cell, centers)
-                    scan(initial, buffer, generator, parameters)
-                    points = buffer[mask(buffer, configuration.threshold)].reshape(-1, configuration.dimension)
-                    points = filter(points, configuration.cut)
+                    points = collect(initial, generator, parameters, configuration, escaping=True)
                     for item in domains:
                         item.update(points)
                     if container is not None:
@@ -319,7 +353,8 @@ def indicator(
     cost:Optional[Callable[[NDArray[float64], NDArray[float64]], int]]=None,
     full:bool=False,
     complexity:bool=True,
-    verbose:bool=True
+    verbose:bool=True,
+    initial:Optional[NDArray[float64]]=None
 ) -> Result:
     """
     Run domain construction loop using a scalar indicator threshold
@@ -348,6 +383,8 @@ def indicator(
         flag to compute cost data when `cost` is provided
     verbose: bool, default=False
         verbose output flag
+    initial: Optional[NDArray[float64]], default=None
+        points used to seed the domains directly; when given, the initial
 
     Returns
     -------
@@ -369,34 +406,37 @@ def indicator(
     rads = []
     cells = []
     container = Domain(configuration.lb, configuration.ub, configuration.dl) if full else None
+    seeds = None if initial is None else initial
     for epoch in range(configuration.nepochs):
         if verbose:
             print(epoch)
             print()
-        seed = None if configuration.seed is None else configuration.seed + epoch
-        ds = directions(configuration.dimension, configuration.ndirections, random=True, seed=seed)
-        rb, xb = da(configuration.dimension, configuration.dr, configuration.threshold, configuration.center, ds, objective, parameters, unstable=True)
-        values = numpy.zeros(configuration.ndirections, dtype=float64)
-        scan(xb, values, metric, parameters)
-        escaped = xb[values > threshold]
-        if len(escaped):
-            buffer = numpy.empty((len(escaped), configuration.size, configuration.dimension), dtype=float64)
-            scan(escaped, buffer, generator, parameters)
-            points = filter(buffer.reshape(-1, configuration.dimension), configuration.cut)
+        if seeds is None:
+            seed = None if configuration.seed is None else configuration.seed + epoch
+            ds = directions(configuration.dimension, configuration.ndirections, random=True, seed=seed)
+            rb, xb = da(configuration.dimension, configuration.dr, configuration.threshold, configuration.center, ds, objective, parameters, unstable=True)
+            values = numpy.zeros(configuration.ndirections, dtype=float64)
+            scan(xb, values, metric, parameters)
+            escaped = xb[values > threshold]
+            points = collect(escaped, generator, parameters, configuration)
+            initial_cost = None
+            if costs is not None:
+                out = numpy.zeros(configuration.ndirections, dtype=numpy.int64)
+                scan(xb, out, cost, parameters)
+                cn = int(configuration.size*numpy.sum((rb/configuration.dr) - 1))
+                cm = int(2*numpy.sum(out))
+                initial_cost = [cn, cm]
+            if verbose:
+                print(ds.shape)
+                print(escaped.shape)
+                print(points.shape)
+                print()
         else:
-            points = numpy.empty((0, configuration.dimension), dtype=float64)
-        initial_cost = None
-        if costs is not None:
-            out = numpy.zeros(configuration.ndirections, dtype=numpy.int64)
-            scan(xb, out, cost, parameters)
-            cn = int(configuration.size*numpy.sum((rb/configuration.dr) - 1))
-            cm = int(2*numpy.sum(out))
-            initial_cost = [cn, cm]
-        if verbose:
-            print(ds.shape)
-            print(escaped.shape)
-            print(points.shape)
-            print()
+            points = seeds
+            initial_cost = [0, 0] if costs is not None else None
+            if verbose:
+                print('initial', points.shape)
+                print()
         domains = []
         for cell in configuration.cells:
             domain = Domain(configuration.lb, configuration.ub, cell)
@@ -441,12 +481,7 @@ def indicator(
                     values = numpy.zeros(len(initial), dtype=float64)
                     scan(initial, values, metric, parameters)
                     escaped = initial[values > threshold]
-                    if len(escaped):
-                        buffer = numpy.empty((len(escaped), configuration.size, configuration.dimension), dtype=float64)
-                        scan(escaped, buffer, generator, parameters)
-                        points = filter(buffer.reshape(-1, configuration.dimension), configuration.cut)
-                    else:
-                        points = numpy.empty((0, configuration.dimension), dtype=float64)
+                    points = collect( escaped, generator, parameters, configuration)
                     for item in domains:
                         item.update(points)
                     if container is not None:
