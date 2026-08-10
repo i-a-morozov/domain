@@ -18,12 +18,22 @@ from numba import prange
 
 from domain.volume import rays
 
+
+def array(cell, dimension:int) -> NDArray[float64]:
+    values = numpy.asarray(cell, dtype=float64)
+    if values.ndim == 0:
+        values = numpy.full(dimension, float(values), dtype=float64)
+    else:
+        values = numpy.array(values, dtype=float64, copy=True)
+    return numpy.ascontiguousarray(values)
+
+
 @dataclass
 class Domain:
     """
     Phase space domain specification and sparse occupancy tracking
 
-    The domain is discretized into a uniform Cartesian grid (Fortran-style / column-major linearization)
+    The domain is discretized into a Cartesian grid (Fortran-style / column-major linearization)
     Occupancy is stored sparsely as a sorted, unique 1D array of flattened cell indices
 
     Parameters
@@ -32,8 +42,8 @@ class Domain:
         lower bounds per dimension, shape (dimension, )
     ub : NDArray[float64]
         upper bounds per dimension, shape (dimension, )
-    cell : float
-        uniform cell size along all dimensions
+    cell : float | NDArray[float64]
+        scalar cell size for a cubic grid or one cell size per dimension
 
     Attributes
     ----------
@@ -83,7 +93,7 @@ class Domain:
     """
     lb: NDArray[float64]
     ub: NDArray[float64]
-    cell: float
+    cell: float | NDArray[float64]
     origin: NDArray[float64] = None
     counts: NDArray[int64] = None
     strides: NDArray[int64] = None
@@ -93,7 +103,10 @@ class Domain:
     def __post_init__(self):
         lb = numpy.asarray(self.lb, dtype=float64)
         ub = numpy.asarray(self.ub, dtype=float64)
-        self.origin, self.counts, self.strides, self.total = box(lb, ub, float(self.cell))
+        self.lb = numpy.ascontiguousarray(lb)
+        self.ub = numpy.ascontiguousarray(ub)
+        self.cell = array(self.cell, len(lb))
+        self.origin, self.counts, self.strides, self.total = box(self.lb, self.ub, self.cell)
         self.keys = numpy.zeros((0, ), dtype=int64)
 
     @property
@@ -106,7 +119,7 @@ class Domain:
 
     def index(self, points:NDArray[float64]) -> NDArray[int64]:        
         points = numpy.ascontiguousarray(points, dtype=float64)
-        return index(points, self.origin, self.counts, self.strides, float(self.cell))
+        return index(points, self.origin, self.counts, self.strides, self.cell)
 
     def convert(self, keys:NDArray[int64]) -> NDArray[int64]:
         keys = numpy.ascontiguousarray(keys, dtype=int64)
@@ -118,7 +131,7 @@ class Domain:
 
     def transform(self, keys:NDArray[int64]) -> NDArray[float64]:
         keys = numpy.ascontiguousarray(keys, dtype=int64)
-        return transform(keys, self.origin, self.counts, self.strides, float(self.cell))
+        return transform(keys, self.origin, self.counts, self.strides, self.cell)
 
     def insert(self, keys:Iterable[int]) -> None:
         self.keys = numpy.union1d(self.keys, keys)
@@ -178,7 +191,7 @@ def cumprod(
 def box(
     lb:NDArray[float64],
     ub:NDArray[float64],
-    cell:float
+    cell:NDArray[float64]
 ) -> Tuple[NDArray[float64], NDArray[int64], NDArray[int64], int64]:
     """
     Define hyperbox from given lower/upper bounds and cell size
@@ -189,8 +202,8 @@ def box(
         low bounds
     ub: NDArray[float64]
         upper bounds    
-    cell: float
-        bin cell size
+    cell: NDArray[float64]
+        one bin size per dimension
 
     Returns
     -------
@@ -205,11 +218,12 @@ def box(
     origin = numpy.empty(dimension, dtype=float64)
     counts = numpy.empty(dimension, dtype=int64)
     for i in range(dimension):
-        origin[i] = lb[i] - 0.5*cell
+        w = cell[i]
+        origin[i] = lb[i] - 0.5*w
         extent = ub[i] - origin[i]
         if extent < 0.0:
             extent = 0.0
-        n = numpy.ceil(extent/cell)
+        n = numpy.ceil(extent/w)
         counts[i] = n if n >= 1 else 1
     strides = cumprod(counts)
     total = 1
@@ -223,7 +237,7 @@ def grid(
     origin:NDArray[float64],
     counts:NDArray[int64],
     strides:NDArray[int64],
-    cell:float
+    cell:NDArray[float64]
 ) -> NDArray[float64]:
     """
     Generate full grid (center of cells)
@@ -236,8 +250,8 @@ def grid(
         number of cells per dimension
     strides: NDArray[int64]
         multi-index factors (Fortran ordering)
-    cell: float
-        cell size
+    cell: NDArray[float64]
+        one cell size per dimension
 
     Returns
     -------
@@ -252,7 +266,7 @@ def grid(
     for i in prange(total):
         for j in range(dimension):
             ij = (i // strides[j]) % counts[j]
-            centers[i, j] = origin[j] + (ij + 0.5)*cell
+            centers[i, j] = origin[j] + (ij + 0.5)*cell[j]
     return centers
 
 
@@ -261,7 +275,7 @@ def index(points:NDArray[float64],
           origin:NDArray[float64],
           counts:NDArray[int64],
           strides:NDArray[int64],
-          cell:float
+          cell:NDArray[float64]
 ) -> NDArray[int64]:
     """
     Index points (indexing starts with one)
@@ -276,8 +290,8 @@ def index(points:NDArray[float64],
         number of cells per dimension
     strides: NDArray[int64]
         multi-index factors (Fortran ordering)
-    cell: float
-        cell size
+    cell: NDArray[float64]
+        one cell size per dimension
 
     Returns
     -------
@@ -286,12 +300,11 @@ def index(points:NDArray[float64],
     """
     length, dimension = points.shape
     ids = numpy.empty(length, dtype=int64)
-    factor = 1.0/cell
     for i in prange(length):
         idx = 0
         member = True
         for j in range(dimension):
-            key = numpy.floor(factor*(points[i, j] - origin[j]))
+            key = numpy.floor((points[i, j] - origin[j])/cell[j])
             if key < 0 or key >= counts[j]:
                 member = False
                 break
@@ -400,7 +413,7 @@ def transform(ids:NDArray[int64],
               origin:NDArray[float64],
               counts:NDArray[int64],
               strides:NDArray[int64],
-              cell:float
+              cell:NDArray[float64]
 ) -> NDArray[float64]:
     """
     Transform ids to grid coordinates
@@ -415,8 +428,8 @@ def transform(ids:NDArray[int64],
         number of cells per dimension
     strides: NDArray[int64]
         multi-index factors (Fortran ordering)
-    cell: float
-        cell size
+    cell: NDArray[float64]
+        one cell size per dimension
 
     Returns
     -------
@@ -429,7 +442,7 @@ def transform(ids:NDArray[int64],
     for i in prange(length):
         idx = ids[i]
         for j in range(dimension):
-            out[i, j] = origin[j] + cell*((idx // strides[j]) % counts[j] + 0.5)
+            out[i, j] = origin[j] + cell[j]*((idx // strides[j]) % counts[j] + 0.5)
     return out
 
 
@@ -516,7 +529,7 @@ def construct(mask:NDArray[bool_],
               origin:NDArray[float64],
               counts:NDArray[int64],
               strides:NDArray[int64],
-              cell:float
+              cell:NDArray[float64]
 ) -> NDArray[float64]:
     """
     Construct True points
@@ -531,8 +544,8 @@ def construct(mask:NDArray[bool_],
         number of cells per dimension
     strides: NDArray[int64]
         multi-index factors (Fortran ordering)
-    cell: float
-        cell size
+    cell: NDArray[float64]
+        one cell size per dimension
 
     Returns
     -------
@@ -570,7 +583,7 @@ def position(indices, strides):
 def interval(
     origin:NDArray[float64],
     counts:NDArray[int64],
-    cell:float,
+    cell:NDArray[float64],
     start:NDArray[float64],
     direction:NDArray[float64],
     radius:float
@@ -584,8 +597,8 @@ def interval(
         grid origin (lower corner), shape (dimension, )
     counts : NDArray[int64]
         number of cells per dimension, shape (dimension, )
-    cell : float
-        cell size
+    cell : NDArray[float64]
+        one cell size per dimension
     start : NDArray[float64]
         ray start point, shape (dimension, )
     direction : NDArray[float64]
@@ -602,7 +615,7 @@ def interval(
     upper = radius
     for i in range(len(origin)):
         left = origin[i]
-        right = origin[i] + counts[i]*cell
+        right = origin[i] + counts[i]*cell[i]
         di = direction[i]
         xi = start[i]
         if di == 0.0:
@@ -627,7 +640,7 @@ def intersection(
     origin:NDArray[float64],
     counts:NDArray[int64],
     strides:NDArray[int64],
-    cell:float,
+    cell:NDArray[float64],
     start:NDArray[float64],
     direction: NDArray[float64],
     keys:NDArray[int64],
@@ -644,8 +657,8 @@ def intersection(
         number of cells per dimension, shape (dimension, )
     strides : NDArray[int64]
         fortran-style stride factors, shape (dimension, )
-    cell : float
-        cell size
+    cell : NDArray[float64]
+        one cell size per dimension
     start : NDArray[float64]
         ray start point, shape (dimension, )
     direction : NDArray[float64]
@@ -670,8 +683,9 @@ def intersection(
     total = enter if enter > 0.0 else 0.0
     idx = numpy.empty(dimension, dtype=int64)
     for i in range(dimension):
+        w = cell[i]
         x = start[i] + total*direction[i]
-        j = numpy.floor((x - origin[i]) / cell)
+        j = numpy.floor((x - origin[i]) / w)
         if j < 0:
             j = 0
         if j >= counts[i]:
@@ -686,15 +700,16 @@ def intersection(
     limit = numpy.empty(dimension, dtype=float64)
     delta = numpy.empty(dimension, dtype=float64)
     for i in range(dimension):
+        w = cell[i]
         di = direction[i]
         if di > 0.0:
             steps[i] = 1
-            limit[i] = ((origin[i] + (idx[i] + 1)*cell) - start[i])/di
-            delta[i] = cell / di
+            limit[i] = ((origin[i] + (idx[i] + 1)*w) - start[i])/di
+            delta[i] = w / di
         elif di < 0.0:
             steps[i] = -1
-            limit[i] = ((origin[i] + idx[i]*cell) - start[i])/di
-            delta[i] = -cell/di
+            limit[i] = ((origin[i] + idx[i]*w) - start[i])/di
+            delta[i] = -w/di
         else:
             steps[i] = 0
             limit[i] = numpy.inf
@@ -770,7 +785,7 @@ def volume(
     origin:NDArray[float64],
     counts:NDArray[int64],
     strides:NDArray[int64],
-    cell:float,
+    cell:NDArray[float64],
     center:NDArray[float64],
     directions:NDArray[float64],
     factors:NDArray[float64],    
@@ -793,8 +808,8 @@ def volume(
         number of cells per dimension, shape (dimension, )
     strides : NDArray[int64]
         fortran-style stride factors, shape (dimension, )
-    cell : float
-        cell size
+    cell : NDArray[float64]
+        one cell size per dimension
     center : NDArray[float64]
         ray origin, shape (dimension, )
     directions : NDArray[float64]
@@ -814,7 +829,9 @@ def volume(
     n_phi = m**k
     d_psi = 0.5*numpy.pi/n
     d_phi = 2.0*numpy.pi/m
-    corner = origin + counts*cell
+    corner = numpy.empty(dimension, dtype=float64)
+    for i in range(dimension):
+        corner[i] = origin[i] + counts[i]*cell[i]
     square = 0.0
     for i in range(dimension):
         dc = corner[i] - center[i]
@@ -851,7 +868,7 @@ def boundary(
     origin:NDArray[float64],
     counts:NDArray[int64],
     stride:NDArray[int64],
-    cell:float,
+    cell:NDArray[float64],
     center:NDArray[float64],
     directions:NDArray[float64],
     keys:NDArray[int64]
@@ -861,25 +878,25 @@ def boundary(
 
     Parameters
     ----------
-    dimension : int
+    dimension: int
         phase space dimension
-    n : int
+    n: int
         number of mixing-angle bins
-    m : int
+    m: int
         number of in-plane angle bins
-    origin : NDArray[float64]
+    origin: NDArray[float64]
         grid origin (lower corner), shape (dimension, )
-    counts : NDArray[int64]
+    counts: NDArray[int64]
         number of cells per dimension, shape (dimension, )
-    stride : NDArray[int64]
+    stride: NDArray[int64]
         fortran-style stride factors, shape (dimension, )
-    cell : float
-        cell size
-    center : NDArray[float64]
+    cell: NDArray[float64]
+        one cell size per dimension
+    center: NDArray[float64]
         ray origin, shape (dimension, )
     directions : NDArray[float64]
         ray directions
-    keys : NDArray[int64]
+    keys: NDArray[int64]
         sorted, unique occupied cell ids
 
     Returns
@@ -887,7 +904,9 @@ def boundary(
     Tuple[NDArray[int64], NDArray[float64], NDArray[float64]]
 
     """
-    corner = origin + counts*cell
+    corner = numpy.empty(dimension, dtype=float64)
+    for i in range(dimension):
+        corner[i] = origin[i] + counts[i]*cell[i]
     square = 0.0
     for i in range(dimension):
         dc = corner[i] - center[i]

@@ -128,7 +128,7 @@ def shell(
 @njit(parallel=True)
 def sample(
     count:int,
-    scale:float,
+    scale:NDArray[float64],
     cloud:NDArray[float64],
 ) -> NDArray[float64]:
     """
@@ -138,8 +138,8 @@ def sample(
     ----------
     count: int
         number of new points for each cloud point
-    scale: float
-        perturbation scale
+    scale: NDArray[float64]
+        one perturbation scale per dimension
     cloud: NDArray[float64]
         cloud
 
@@ -158,8 +158,8 @@ def sample(
             idx = shift + j
             vector = normalize(numpy.random.randn(dimension))
             radius = numpy.random.random()**exponent
-            for j in range(dimension):
-                points[idx, j] = point[j] + scale*radius*vector[j]
+            for k in range(dimension):
+                points[idx, k] = point[k] + scale[k]*radius*vector[k]
     return points
 
 

@@ -17,6 +17,7 @@ from numba import njit
 
 from domain.da import da
 from domain.domain import Domain
+from domain.domain import array
 from domain.sample import filter
 from domain.sample import mask
 from domain.sample import sample
@@ -27,7 +28,7 @@ from domain.volume import directions
 from domain.volume import rays
 from domain.volume import mean
 
-__version__ = '0.1.2'
+__version__ = '0.1.3'
 
 
 @dataclass
@@ -41,8 +42,8 @@ class Configuration:
         domain lower bounds
     ub: NDArray[float64]
         domain upper bounds
-    dl: float
-        domain cell side length
+    dl: float | NDArray[float64]
+        scalar domain cell size or one cell size per dimension
     size: int
         total number of mapping iterations
     ndirections: int, default=8
@@ -93,7 +94,7 @@ class Configuration:
     """
     lb: NDArray[float64]
     ub: NDArray[float64]
-    dl: float
+    dl: float | NDArray[float64]
     size: int
     ndirections: int = 8
     nsamples: int = 1024
@@ -122,6 +123,7 @@ class Configuration:
         self.lb = numpy.asarray(self.lb, dtype=float64)
         self.ub = numpy.asarray(self.ub, dtype=float64)
         self.center = numpy.asarray(self.center, dtype=float64)
+        self.dl = array(self.dl, self.dimension)
         self.batch = int(self.batch)
 
     @property
@@ -130,11 +132,11 @@ class Configuration:
 
     @property
     def dr(self) -> float:
-        return float(self.dl)*self.dimension**0.5
+        return float(numpy.linalg.norm(self.dl))
 
     @property
-    def cells(self) -> list[float]:
-        return [float(ld)*float(self.dl) for ld in self.lds]
+    def cells(self) -> list[NDArray[float64]]:
+        return [float(ld)*self.dl for ld in self.lds]
 
 
 @dataclass
@@ -227,15 +229,35 @@ def grow(
     for epoch in range(epochs):
         if domain.size == 0:
             break
+        previous = domain.size
         indices = numpy.random.choice(domain.list, configuration.nsamples)
         centers = domain.transform(indices)
         initial = sample(configuration.npoints, configuration.scale*domain.cell, centers)
+        batches = (len(initial) + configuration.batch - 1)//configuration.batch
+        if verbose:
+            print(
+                f'{epoch + 1:02d} start'
+                f' {previous:12d}'
+                f' {len(initial):8d} initials'
+                f' {batches:4d} batches',
+                flush=True)
+        key_chunks = []
         for start in range(0, len(initial), configuration.batch):
             local = numpy.ascontiguousarray(initial[start:start + configuration.batch])
             points = collect(local, generator, parameters, configuration, escaping=True, cut=configuration.threshold)
-            domain.update(points)
+            keys = domain.index(points)
+            keys = keys[keys >= 0]
+            if len(keys):
+                key_chunks.append(numpy.unique(keys))
+        if key_chunks:
+            domain.insert(numpy.concatenate(key_chunks))
         if verbose:
-            print(f'{epoch + 1:02d}', f'{domain.size:12d}')
+            print(
+                f'{epoch + 1:02d} done '
+                f' {domain.size:12d}'
+                f' +{domain.size - previous:d}',
+                flush=True
+            )
         if domain.size > limit:
             break
     return domain
@@ -291,22 +313,56 @@ def grow_indicator(
     for epoch in range(epochs):
         if domain.size == 0:
             break
+        previous = domain.size
         indices = numpy.random.choice(domain.list, configuration.nsamples)
         centers = domain.transform(indices)
         initial = sample(configuration.npoints, configuration.scale*domain.cell, centers)
+        if verbose:
+            print(
+                f'{epoch + 1:02d} start'
+                f' {previous:12d}'
+                f' {len(initial):8d} initials',
+                flush=True
+            )
         values_forward_inverse = numpy.empty(len(initial), dtype=float64)
         values_inverse_forward = numpy.empty(len(initial), dtype=float64)
         scan(initial, values_forward_inverse, metric_forward_inverse, parameters)
         scan(initial, values_inverse_forward, metric_inverse_forward, parameters)
-        selected = initial[(values_forward_inverse > threshold) | (values_inverse_forward > threshold)]
+        selected = initial[
+            ~numpy.isfinite(values_forward_inverse)
+            | ~numpy.isfinite(values_inverse_forward)
+            | (values_forward_inverse > threshold)
+            | (values_inverse_forward > threshold)
+        ]
+        batches = (len(selected) + configuration.batch - 1)//configuration.batch
+        if verbose:
+            print(
+                f'   selected {len(selected):8d}'
+                f' {batches:4d} batches',
+                flush=True,
+            )
+        key_chunks = []
         for start in range(0, len(selected), configuration.batch):
             local = numpy.ascontiguousarray(selected[start:start + configuration.batch])
             points = collect(local, orbit_forward, parameters, configuration, cut=configuration.threshold)
-            domain.update(points)
+            keys = domain.index(points)
+            keys = keys[keys >= 0]
+            if len(keys):
+                key_chunks.append(numpy.unique(keys))
             points = collect(local, orbit_inverse, parameters, configuration, cut=configuration.threshold)
-            domain.update(points)
+            keys = domain.index(points)
+            keys = keys[keys >= 0]
+            if len(keys):
+                key_chunks.append(numpy.unique(keys))
+        if key_chunks:
+            domain.insert(numpy.concatenate(key_chunks))
         if verbose:
-            print(f'{epoch + 1:02d}', f'{domain.size:12d}')
+            print(
+                f'{epoch + 1:02d} done '
+                f' {domain.size:12d}'
+                f' +{domain.size - previous:d}',
+                flush=True,
+            )
         if domain.size > limit:
             break
     return domain
@@ -542,7 +598,7 @@ def compute_indicator(
             rb, xb = da(configuration.dimension, configuration.dr, configuration.threshold, configuration.center, ds, objective, parameters, unstable=True)
             values = numpy.zeros(configuration.ndirections, dtype=float64)
             scan(xb, values, metric, parameters)
-            escaped = xb[values > threshold]
+            escaped = xb[~numpy.isfinite(values) | (values > threshold)]
             points = collect(escaped, generator, parameters, configuration)
             initial_cost = None
             if costs is not None:
@@ -605,7 +661,7 @@ def compute_indicator(
                     initial = sample(configuration.npoints, configuration.scale*cell, centers)
                     values = numpy.zeros(len(initial), dtype=float64)
                     scan(initial, values, metric, parameters)
-                    escaped = initial[values > threshold]
+                    escaped = initial[~numpy.isfinite(values) | (values > threshold)]
                     points = collect( escaped, generator, parameters, configuration)
                     for item in domains:
                         item.update(points)
