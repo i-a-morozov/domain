@@ -3,8 +3,10 @@ Version and domain loop macro
 
 """
 from typing import Callable
+from typing import Iterator
 from typing import Optional
 from typing import List
+from typing import Sequence
 
 from dataclasses import dataclass
 from dataclasses import field
@@ -165,17 +167,15 @@ class Result:
     container: Optional[Domain]
 
 
-def collect(
+def batches(
     initial:NDArray[float64],
     generator:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]],
     parameters:NDArray[float64],
     configuration:Configuration,
     escaping:bool=False,
-    cut:Optional[float]=None,
-) -> NDArray[float64]:
-    """ Collect filtered orbit points while bounding the full-orbit buffer """
+    cut:Optional[float]=None
+) -> Iterator[NDArray[float64]]:
     radius = configuration.cut if cut is None else float(cut)
-    chunks = []
     for start in range(0, len(initial), configuration.batch):
         local = numpy.ascontiguousarray(initial[start:start + configuration.batch])
         buffer = numpy.empty((len(local), configuration.size, configuration.dimension), dtype=float64)
@@ -185,10 +185,38 @@ def collect(
         if len(buffer):
             points = filter(buffer.reshape(-1, configuration.dimension), radius)
             if len(points):
-                chunks.append(points)
+                yield points
+
+
+def collect(
+    initial:NDArray[float64],
+    generator:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]],
+    parameters:NDArray[float64],
+    configuration:Configuration,
+    escaping:bool=False,
+    cut:Optional[float]=None
+) -> NDArray[float64]:
+    chunks = list(batches(initial, generator, parameters, configuration, escaping=escaping, cut=cut))
     if not chunks:
         return numpy.empty((0, configuration.dimension), dtype=float64)
     return numpy.vstack(chunks)
+
+
+def project(
+    initial:NDArray[float64],
+    generator:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]],
+    parameters:NDArray[float64],
+    configuration:Configuration,
+    domains:Sequence[Domain],
+    escaping:bool=False,
+    cut:Optional[float]=None,
+) -> int:
+    count = 0
+    for points in batches(initial, generator, parameters, configuration, escaping=escaping, cut=cut):
+        for domain in domains:
+            domain.update(points)
+        count += len(points)
+    return count
 
 
 def grow(
@@ -241,16 +269,7 @@ def grow(
                 f' {len(initial):8d} initials'
                 f' {batches:4d} batches',
                 flush=True)
-        key_chunks = []
-        for start in range(0, len(initial), configuration.batch):
-            local = numpy.ascontiguousarray(initial[start:start + configuration.batch])
-            points = collect(local, generator, parameters, configuration, escaping=True, cut=configuration.threshold)
-            keys = domain.index(points)
-            keys = keys[keys >= 0]
-            if len(keys):
-                key_chunks.append(numpy.unique(keys))
-        if key_chunks:
-            domain.insert(numpy.concatenate(key_chunks))
+        project(initial, generator, parameters, configuration, (domain, ), escaping=True, cut=configuration.threshold)
         if verbose:
             print(
                 f'{epoch + 1:02d} done '
@@ -341,21 +360,8 @@ def grow_indicator(
                 f' {batches:4d} batches',
                 flush=True,
             )
-        key_chunks = []
-        for start in range(0, len(selected), configuration.batch):
-            local = numpy.ascontiguousarray(selected[start:start + configuration.batch])
-            points = collect(local, orbit_forward, parameters, configuration, cut=configuration.threshold)
-            keys = domain.index(points)
-            keys = keys[keys >= 0]
-            if len(keys):
-                key_chunks.append(numpy.unique(keys))
-            points = collect(local, orbit_inverse, parameters, configuration, cut=configuration.threshold)
-            keys = domain.index(points)
-            keys = keys[keys >= 0]
-            if len(keys):
-                key_chunks.append(numpy.unique(keys))
-        if key_chunks:
-            domain.insert(numpy.concatenate(key_chunks))
+        project(selected, orbit_forward, parameters, configuration, (domain, ), cut=configuration.threshold)
+        project(selected, orbit_inverse, parameters, configuration, (domain, ), cut=configuration.threshold)
         if verbose:
             print(
                 f'{epoch + 1:02d} done '
@@ -422,11 +428,13 @@ def compute(
         if verbose:
             print(epoch)
             print()
+        domains = [Domain(configuration.lb, configuration.ub, cell) for cell in configuration.cells]
+        targets = domains if container is None else [*domains, container]
         if seeds is None:
             seed = None if configuration.seed is None else configuration.seed + epoch
             ds = directions(configuration.dimension, configuration.ndirections, random=True, seed=seed)
             rb, xb = da(configuration.dimension, configuration.dr, configuration.threshold, configuration.center, ds, objective, parameters, unstable=True)
-            points = collect(xb, generator, parameters, configuration)
+            point_count = project(xb, generator, parameters, configuration, targets)
             initial_cost = None
             if costs is not None:
                 out = numpy.zeros(configuration.ndirections, dtype=numpy.int64)
@@ -437,30 +445,26 @@ def compute(
             if verbose:
                 print(ds.shape)
                 print((len(xb)*configuration.size, configuration.dimension))
-                print(points.shape)
+                print((point_count, configuration.dimension))
                 print()
         else:
-            points = seeds
+            point_count = len(seeds)
+            for target in targets:
+                target.update(seeds)
             initial_cost = [0, 0] if costs is not None else None
             if verbose:
-                print('initial', points.shape)
+                print('initial', seeds.shape)
                 print()
-        domains = []
-        for cell in configuration.cells:
-            domain = Domain(configuration.lb, configuration.ub, cell)
-            domain.update(points)
-            domains.append(domain)
+        for domain in domains:
             if verbose:
                 print((domain.size, domain.total))
         if verbose and domains:
             print()
-        if container is not None:
-            container.update(points)
         local_data = []
         local_cost = [] if costs is not None else None
         local_rads = []
         while domains:
-            domain = domains[0]
+            domain, *_ = domains
             if domain.size == 0:
                 cells.append(domains.pop(0))
                 table.append(list(local_data))
@@ -486,12 +490,9 @@ def compute(
                         power=configuration.power,
                     )
                     initial = sample(configuration.npoints, configuration.scale*cell, centers)
-                    points = collect(initial, generator, parameters, configuration, escaping=True)
-                    for item in domains:
-                        item.update(points)
-                    if container is not None:
-                        container.update(points)
-                    domain = domains[0]
+                    targets = domains if container is None else [*domains, container]
+                    project(initial, generator, parameters, configuration, targets, escaping=True)
+                    domain, *_ = domains
                     keys, rs, xs = domain.boundary(*pair, configuration.center, ds)
                     rs = rs[keys != -1]
                     xs = xs[keys != -1]
@@ -501,7 +502,7 @@ def compute(
                     keys = numpy.unique(keys[keys != -1])
                     boundary.insert(keys)
                     domains = [boundary] + domains[1:]
-                    domain = domains[0]
+                    domain, *_ = domains
                     local_data.append(numpy.asarray([flag, domain.size, len(ds)]))
                     local_rads.append(radius)
                     if local_cost is not None:
@@ -592,6 +593,8 @@ def compute_indicator(
         if verbose:
             print(epoch)
             print()
+        domains = [Domain(configuration.lb, configuration.ub, cell) for cell in configuration.cells]
+        targets = domains if container is None else [*domains, container]
         if seeds is None:
             seed = None if configuration.seed is None else configuration.seed + epoch
             ds = directions(configuration.dimension, configuration.ndirections, random=True, seed=seed)
@@ -599,7 +602,7 @@ def compute_indicator(
             values = numpy.zeros(configuration.ndirections, dtype=float64)
             scan(xb, values, metric, parameters)
             escaped = xb[~numpy.isfinite(values) | (values > threshold)]
-            points = collect(escaped, generator, parameters, configuration)
+            point_count = project(escaped, generator, parameters, configuration, targets)
             initial_cost = None
             if costs is not None:
                 out = numpy.zeros(configuration.ndirections, dtype=numpy.int64)
@@ -610,30 +613,26 @@ def compute_indicator(
             if verbose:
                 print(ds.shape)
                 print(escaped.shape)
-                print(points.shape)
+                print((point_count, configuration.dimension))
                 print()
         else:
-            points = seeds
+            point_count = len(seeds)
+            for target in targets:
+                target.update(seeds)
             initial_cost = [0, 0] if costs is not None else None
             if verbose:
-                print('initial', points.shape)
+                print('initial', seeds.shape)
                 print()
-        domains = []
-        for cell in configuration.cells:
-            domain = Domain(configuration.lb, configuration.ub, cell)
-            domain.update(points)
-            domains.append(domain)
+        for domain in domains:
             if verbose:
                 print((domain.size, domain.total))
         if verbose and domains:
             print()
-        if container is not None:
-            container.update(points)
         local_data = []
         local_cost = [] if costs is not None else None
         local_rads = []
         while domains:
-            domain = domains[0]
+            domain, *_ = domains
             if domain.size == 0:
                 cells.append(domains.pop(0))
                 table.append(list(local_data))
@@ -662,12 +661,9 @@ def compute_indicator(
                     values = numpy.zeros(len(initial), dtype=float64)
                     scan(initial, values, metric, parameters)
                     escaped = initial[~numpy.isfinite(values) | (values > threshold)]
-                    points = collect( escaped, generator, parameters, configuration)
-                    for item in domains:
-                        item.update(points)
-                    if container is not None:
-                        container.update(points)
-                    domain = domains[0]
+                    targets = domains if container is None else [*domains, container]
+                    project(escaped, generator, parameters, configuration, targets)
+                    domain, *_ = domains
                     keys, rs, xs = domain.boundary(*pair, configuration.center, ds)
                     rs = rs[keys != -1]
                     xs = xs[keys != -1]
@@ -677,7 +673,7 @@ def compute_indicator(
                     keys = numpy.unique(keys[keys != -1])
                     boundary.insert(keys)
                     domains = [boundary] + domains[1:]
-                    domain = domains[0]
+                    domain, *_ = domains
                     local_data.append(numpy.asarray([flag, domain.size, len(ds)]))
                     local_rads.append(radius)
                     if local_cost is not None:
@@ -705,6 +701,7 @@ __all__ = [
     'Configuration',
     'Result',
     'collect',
+    'project',
     'compute',
     'compute_indicator',
     'grow',
