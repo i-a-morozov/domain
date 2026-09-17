@@ -3,6 +3,7 @@ Scan functions
 
 """
 from typing import Callable
+from typing import Optional
 from typing import Union
 
 from numpy import bool_
@@ -14,11 +15,15 @@ import numpy
 from numba import njit
 from numba import prange
 
+from domain.escape import Escape
+from domain.escape import escaped
+
 
 def iterate(
     length:int,
     radius:float,
-    mapping:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]], 
+    mapping:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]], *,
+    escape:Optional[Escape]=None
 ) -> Callable[[NDArray[float64], NDArray[float64]], bool]:
     """
     Iteration factory
@@ -33,6 +38,8 @@ def iterate(
         threshold radius
     mapping: Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]]
         mapping
+    escape: Optional[Escape]
+        numba-compatible escape(state, radius, parameters)
 
     Returns
     -------
@@ -40,6 +47,18 @@ def iterate(
     ((dimension, ), (...)) -> bool
     
     """
+    if escape is not None:
+        @njit
+        def closure(state, parameters):
+            if escaped(state, radius, parameters, escape):
+                return False
+            local = numpy.copy(state)
+            for _ in range(length):
+                local = mapping(local, parameters)
+                if escaped(local, radius, parameters, escape):
+                    return False
+            return True
+        return closure
     threshold = radius*radius
     @njit
     def closure(
@@ -67,7 +86,8 @@ def iterate(
 def count(
     length:int,
     radius:float,
-    mapping:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]], 
+    mapping:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]],  *,
+    escape:Optional[Escape]=None
 ) -> Callable[[NDArray[float64], NDArray[float64]], int]:
     """
     Count (survival) factory
@@ -82,6 +102,8 @@ def count(
         threshold radius
     mapping: Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]]
         mapping
+    escape: Optional[Escape]
+        numba-compatible escape(state, radius, parameters)        
 
     Returns
     -------
@@ -89,6 +111,20 @@ def count(
     ((dimension, ), (...)) -> int
     
     """
+    if escape is not None:
+        @njit
+        def closure(state, parameters):
+            survived = 0
+            if escaped(state, radius, parameters, escape):
+                return survived
+            local = numpy.copy(state)
+            for _ in range(length):
+                local = mapping(local, parameters)
+                if escaped(local, radius, parameters, escape):
+                    return survived
+                survived += 1
+            return survived
+        return closure
     threshold = radius*radius
     @njit
     def closure(
@@ -118,7 +154,8 @@ def count(
 def orbit(
     length:int,
     radius:float,
-    mapping:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]]
+    mapping:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]], *,
+    escape:Optional[Escape]=None,
 ) ->  Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]]:
     """
     Orbit factory
@@ -134,6 +171,8 @@ def orbit(
         threshold radius
     mapping: Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]]
         mapping
+    escape: Optional[Escape]
+        numba-compatible escape(state, radius, parameters)         
 
     Returns
     -------
@@ -141,6 +180,20 @@ def orbit(
     ((dimension, ), (...)) -> (length, dimension)
     
     """    
+    if escape is not None:
+        @njit
+        def closure(state, parameters):
+            points = numpy.full((length, len(state)), numpy.nan, dtype=float64)
+            if escaped(state, radius, parameters, escape):
+                return points
+            local = numpy.copy(state)
+            for i in range(length):
+                local = mapping(local, parameters)
+                points[i] = local
+                if escaped(local, radius, parameters, escape):
+                    return points
+            return points
+        return closure
     threshold = radius*radius
     @njit
     def closure(

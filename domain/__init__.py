@@ -17,6 +17,7 @@ from numpy.typing import NDArray
 
 from numba import njit
 
+from domain.escape import Escape
 from domain.da import da
 from domain.domain import Domain
 from domain.domain import array
@@ -173,17 +174,22 @@ def batches(
     parameters:NDArray[float64],
     configuration:Configuration,
     escaping:bool=False,
-    cut:Optional[float]=None
+    cut:Optional[float]=None, *,
+    escape:Optional[Escape]=None
 ) -> Iterator[NDArray[float64]]:
+    """
+    Stream orbit points using the generator's escape criterion
+
+    """
     radius = configuration.cut if cut is None else float(cut)
     for start in range(0, len(initial), configuration.batch):
         local = numpy.ascontiguousarray(initial[start:start + configuration.batch])
         buffer = numpy.empty((len(local), configuration.size, configuration.dimension), dtype=float64)
         scan(local, buffer, generator, parameters)
         if escaping:
-            buffer = buffer[mask(buffer, configuration.threshold)]
+            buffer = buffer[mask(buffer, configuration.threshold, escape=escape, parameters=parameters)]
         if len(buffer):
-            points = filter(buffer.reshape(-1, configuration.dimension), radius)
+            points = filter(buffer.reshape(-1, configuration.dimension), radius, escape=escape, parameters=parameters)
             if len(points):
                 yield points
 
@@ -194,9 +200,15 @@ def collect(
     parameters:NDArray[float64],
     configuration:Configuration,
     escaping:bool=False,
-    cut:Optional[float]=None
+    cut:Optional[float]=None, *,
+    escape:Optional[Escape]=None
 ) -> NDArray[float64]:
-    chunks = list(batches(initial, generator, parameters, configuration, escaping=escaping, cut=cut))
+    """
+    Collect streamed points
+    
+    """
+    options = {} if escape is None else {'escape': escape}
+    chunks = list(batches(initial, generator, parameters, configuration, escaping=escaping, cut=cut, **options))
     if not chunks:
         return numpy.empty((0, configuration.dimension), dtype=float64)
     return numpy.vstack(chunks)
@@ -209,10 +221,16 @@ def project(
     configuration:Configuration,
     domains:Sequence[Domain],
     escaping:bool=False,
-    cut:Optional[float]=None,
+    cut:Optional[float]=None, *,
+    escape:Optional[Escape]=None,
 ) -> int:
+    """
+    Update domains from streamed points
+    
+    """
+    options = {} if escape is None else {'escape': escape}
     count = 0
-    for points in batches(initial, generator, parameters, configuration, escaping=escaping, cut=cut):
+    for points in batches(initial, generator, parameters, configuration, escaping=escaping, cut=cut, **options):
         for domain in domains:
             domain.update(points)
         count += len(points)
@@ -226,7 +244,8 @@ def grow(
     domain:Domain,
     epochs:int=64,
     limit:int=64_000_000,
-    verbose:bool=True
+    verbose:bool=True, *,
+    escape:Optional[Escape]=None
 ) -> Domain:
     """
     Grow an escape-based transport domain
@@ -253,7 +272,8 @@ def grow(
     Domain
 
     """
-    generator = orbit(configuration.size, configuration.threshold, mapping)
+    options = {} if escape is None else {'escape': escape}
+    generator = orbit(configuration.size, configuration.threshold, mapping, **options)
     for epoch in range(epochs):
         if domain.size == 0:
             break
@@ -269,7 +289,7 @@ def grow(
                 f' {len(initial):8d} initials'
                 f' {batches:4d} batches',
                 flush=True)
-        project(initial, generator, parameters, configuration, (domain, ), escaping=True, cut=configuration.threshold)
+        project(initial, generator, parameters, configuration, (domain, ), escaping=True, cut=configuration.threshold, **options)
         if verbose:
             print(
                 f'{epoch + 1:02d} done '
@@ -292,7 +312,8 @@ def grow_indicator(
     domain:Domain,
     epochs:int=16,
     limit:int=128_000_000,
-    verbose:bool=True,
+    verbose:bool=True, *,
+    escape:Optional[Escape]=None,
 ) -> Domain:
     """
     Grow an indicator-based transport domain
@@ -327,8 +348,9 @@ def grow_indicator(
     """
     metric_forward_inverse = factory(configuration.size, forward, inverse)
     metric_inverse_forward = factory(configuration.size, inverse, forward)
-    orbit_forward = orbit(configuration.size, configuration.threshold, forward)
-    orbit_inverse = orbit(configuration.size, configuration.threshold, inverse)
+    options = {} if escape is None else {'escape': escape}
+    orbit_forward = orbit(configuration.size, configuration.threshold, forward, **options)
+    orbit_inverse = orbit(configuration.size, configuration.threshold, inverse, **options)
     for epoch in range(epochs):
         if domain.size == 0:
             break
@@ -360,8 +382,8 @@ def grow_indicator(
                 f' {batches:4d} batches',
                 flush=True,
             )
-        project(selected, orbit_forward, parameters, configuration, (domain, ), cut=configuration.threshold)
-        project(selected, orbit_inverse, parameters, configuration, (domain, ), cut=configuration.threshold)
+        project(selected, orbit_forward, parameters, configuration, (domain, ), cut=configuration.threshold, **options)
+        project(selected, orbit_inverse, parameters, configuration, (domain, ), cut=configuration.threshold, **options)
         if verbose:
             print(
                 f'{epoch + 1:02d} done '
@@ -384,7 +406,8 @@ def compute(
     full:bool=False,
     complexity:bool=True,
     verbose:bool=True,
-    initial:Optional[NDArray[float64]]=None
+    initial:Optional[NDArray[float64]]=None, *,
+    escape:Optional[Escape]=None
 ) -> Result:
     """
     Run domain construction loop
@@ -422,7 +445,8 @@ def compute(
     rads = []
     cells = []
     container = Domain(configuration.lb, configuration.ub, configuration.dl) if full else None
-    generator = orbit(configuration.size, configuration.threshold, mapping)
+    options = {} if escape is None else {'escape': escape}
+    generator = orbit(configuration.size, configuration.threshold, mapping, **options)
     seeds = None if initial is None else initial
     for epoch in range(configuration.nepochs):
         if verbose:
@@ -434,7 +458,8 @@ def compute(
             seed = None if configuration.seed is None else configuration.seed + epoch
             ds = directions(configuration.dimension, configuration.ndirections, random=True, seed=seed)
             rb, xb = da(configuration.dimension, configuration.dr, configuration.threshold, configuration.center, ds, objective, parameters, unstable=True)
-            point_count = project(xb, generator, parameters, configuration, targets)
+            seed_options = {} if escape is None else {'escape': escape, 'escaping': True}
+            point_count = project(xb, generator, parameters, configuration, targets, **seed_options)
             initial_cost = None
             if costs is not None:
                 out = numpy.zeros(configuration.ndirections, dtype=numpy.int64)
@@ -491,7 +516,7 @@ def compute(
                     )
                     initial = sample(configuration.npoints, configuration.scale*cell, centers)
                     targets = domains if container is None else [*domains, container]
-                    project(initial, generator, parameters, configuration, targets, escaping=True)
+                    project(initial, generator, parameters, configuration, targets, escaping=True, **options)
                     domain, *_ = domains
                     keys, rs, xs = domain.boundary(*pair, configuration.center, ds)
                     rs = rs[keys != -1]
@@ -536,7 +561,8 @@ def compute_indicator(
     full:bool=False,
     complexity:bool=True,
     verbose:bool=True,
-    initial:Optional[NDArray[float64]]=None
+    initial:Optional[NDArray[float64]]=None, *,
+    escape:Optional[Escape]=None
 ) -> Result:
     """
     Run domain construction loop using a scalar indicator threshold
@@ -574,7 +600,8 @@ def compute_indicator(
 
     """
     metric = factory(configuration.size, forward, inverse)
-    generator = orbit(configuration.size, configuration.threshold, forward)
+    options = {} if escape is None else {'escape': escape}
+    generator = orbit(configuration.size, configuration.threshold, forward, **options)
 
     @njit
     def objective(
@@ -602,7 +629,7 @@ def compute_indicator(
             values = numpy.zeros(configuration.ndirections, dtype=float64)
             scan(xb, values, metric, parameters)
             escaped = xb[~numpy.isfinite(values) | (values > threshold)]
-            point_count = project(escaped, generator, parameters, configuration, targets)
+            point_count = project(escaped, generator, parameters, configuration, targets, **options)
             initial_cost = None
             if costs is not None:
                 out = numpy.zeros(configuration.ndirections, dtype=numpy.int64)
@@ -662,7 +689,7 @@ def compute_indicator(
                     scan(initial, values, metric, parameters)
                     escaped = initial[~numpy.isfinite(values) | (values > threshold)]
                     targets = domains if container is None else [*domains, container]
-                    project(escaped, generator, parameters, configuration, targets)
+                    project(escaped, generator, parameters, configuration, targets, **options)
                     domain, *_ = domains
                     keys, rs, xs = domain.boundary(*pair, configuration.center, ds)
                     rs = rs[keys != -1]

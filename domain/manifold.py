@@ -17,6 +17,9 @@ from numpy import int64
 from numpy.typing import NDArray
 import numpy
 
+from domain.escape import Escape
+from domain.sample import mask as custom
+from domain.sample import filter
 from domain.fp import Mapping
 from domain.fp import chain
 from domain.fp import classify
@@ -336,11 +339,13 @@ def perturbation(
     return numpy.asarray(values).reshape(-1, dimension)
 
 
-def mask(
+def mask_orbits(
     data:NDArray[float64],
     cut:int,
     radius:float,
-    strict:bool=True,
+    strict:bool=True, *,
+    escape:Optional[Escape]=None,
+    parameters:Optional[NDArray[float64]]=None,
 ) -> NDArray[bool_]:
     """
     Mask orbits escaping after a given iteration
@@ -363,6 +368,12 @@ def mask(
     """
     _, length, _ = data.shape
     cut = int(numpy.clip(cut, 0, length))
+    if escape is not None:
+        selected = custom(data, radius, cut=cut, escape=escape, parameters=parameters)
+        if strict:
+            before = custom(data[:, :cut], radius, escape=escape, parameters=parameters)
+            selected = selected & numpy.logical_not(before)
+        return selected
     nan = numpy.isnan(data)
     square = numpy.sum(data*data, axis=-1)
     selected = (numpy.any(nan[:, cut:, :], axis=(1, 2)) | numpy.any(square[:, cut:] > radius*radius, axis=1))
@@ -370,6 +381,10 @@ def mask(
         before = (numpy.any(nan[:, :cut, :], axis=(1, 2)) | numpy.any(square[:, :cut] > radius*radius, axis=1))
         selected = selected & numpy.logical_not(before)
     return selected
+
+
+# Preserve the original public name and argument order.
+mask = mask_orbits
 
 
 def propagate(
@@ -431,10 +446,15 @@ def construct(
     shuffle:bool=False,
     difference:float=1.0E-6,
     tolerance:float=1.0E-9,
-    surface:bool=False,
+    surface:bool=False, *,
+    escape:Optional[Escape]=None
 ) -> Tuple[NDArray[float64], NDArray[float64]]:
     """
     Construct stable and unstable hyperbolic-manifold clouds
+
+    Optional ``escape(state, radius, parameters)`` replaces radius checks for
+    orbit selection and retained points, using the same contract as scan.orbit.
+    Propagation still computes the requested full trajectories.
 
     Unstable initials are propagated with the forward mapping and stable
     initials with the inverse mapping. Complete periodic chains are generated
@@ -544,16 +564,22 @@ def construct(
         if not len(orbits):
             return numpy.empty((0, dimension), dtype=float64)
         with numpy.errstate(over="ignore", invalid="ignore"):
-            selected = mask(orbits, cut, radius, strict=strict)
+            selected = mask_orbits(orbits, cut, radius, strict=strict, escape=escape, parameters=parameters)
             if full:
-                finite = numpy.isfinite(orbits).all(axis=(1, 2))
-                square = numpy.sum(orbits*orbits, axis=-1)
-                bounded = numpy.all(square <= radius*radius, axis=1)
-                selected = selected | (finite & bounded)
+                if escape is None:
+                    finite = numpy.isfinite(orbits).all(axis=(1, 2))
+                    square = numpy.sum(orbits*orbits, axis=-1)
+                    bounded = numpy.all(square <= radius*radius, axis=1)
+                    selected = selected | (finite & bounded)
+                else:
+                    selected = selected | ~custom(orbits, radius, escape=escape, parameters=parameters)
             orbits = orbits[selected]
             cloud = orbits.reshape(-1, dimension)
-            cloud = cloud[numpy.isfinite(cloud).all(axis=1)]
-            cloud = cloud[numpy.linalg.norm(cloud, axis=1) < radius]
+            if escape is None:
+                cloud = cloud[numpy.isfinite(cloud).all(axis=1)]
+                cloud = cloud[numpy.linalg.norm(cloud, axis=1) < radius]
+            else:
+                cloud = filter(cloud, radius, escape=escape, parameters=parameters)
         if reduce:
             cloud = downsample(cloud, size=size, total=total, shuffle=shuffle, seed=seed)
         return cloud

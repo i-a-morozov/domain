@@ -13,14 +13,24 @@ import numpy
 from numba import njit
 from numba import prange
 
+from domain.escape import Escape
+from domain.escape import escaped
+
 @njit(parallel=True)
 def mask(
     orbits: NDArray[float64],
     radius: float,
     cut: Optional[int] = None,
+    escape: Optional[Escape] = None,
+    parameters: Optional[NDArray[float64]] = None
 ) -> NDArray[bool_]:
     """
     Mask escaped orbits
+
+    ``escape(state, radius, parameters)`` can replace the hyperball test.
+    It must be Numba-compatible and return True for escape; any nonfinite
+    coordinate also marks loss. Omitted parameters become an empty array.
+    With escape=None the original test and cut semantics are unchanged.
 
     An orbit is marked lost if:
       - any NaN appears in any point of the orbit
@@ -38,6 +48,10 @@ def mask(
         escape radius
     cut: Optional[int]
         threshold iteration index
+    escape: Optional[Escape]
+        numba-compatible escape(state, radius, parameters)
+    parameters: Optional[NDArray[float64]]
+        escape parameters   
 
     Returns
     -------
@@ -48,6 +62,15 @@ def mask(
     threshold = radius*radius
     mask = numpy.zeros(size, dtype=bool_)
     flag = cut is not None
+    if escape is not None:
+        for i in prange(size):
+            for j in range(length):
+                if flag and j < cut:
+                    continue
+                if escaped(orbits[i, j], radius, parameters, escape):
+                    mask[i] = True
+                    break
+        return mask
     for i in prange(size):
         lost = False
         for j in range(length):
@@ -87,7 +110,7 @@ def shell(
     point:NDArray[float64],
     basis:NDArray[float64],
     scale:float,
-    nball:int,
+    nball:int
 ) -> NDArray[float64]:
     """
     K-ball random shell sampling
@@ -129,7 +152,7 @@ def shell(
 def sample(
     count:int,
     scale:NDArray[float64],
-    cloud:NDArray[float64],
+    cloud:NDArray[float64]
 ) -> NDArray[float64]:
     """
     Generate sample by perturbation (K-ball volume)
@@ -167,6 +190,8 @@ def sample(
 def filter(
     cloud:NDArray[float64],
     radius:float,
+    escape:Optional[Escape]=None,
+    parameters:Optional[NDArray[float64]]=None
 ) -> NDArray[float64]:
     """
     Filter points by NaNs and hyperball radius
@@ -177,6 +202,10 @@ def filter(
         input cloud of shape (length, dimension)
     radius: float
         radius threshold
+    escape: Optional[Escape]
+        numba-compatible escape(state, radius, parameters)
+    parameters: Optional[NDArray[float64]]
+        escape parameters        
 
     Returns
     -------
@@ -188,15 +217,18 @@ def filter(
     keep = numpy.zeros(length, dtype=bool_)
     count = 0
     for i in range(length):
-        nan = False
-        square = 0.0
-        for j in range(dimension):
-            value = cloud[i, j]
-            if numpy.isnan(value):
-                nan = True
-                break
-            square += value*value
-        good = (not nan) and (square < threshold)
+        if escape is not None:
+            good = not escaped(cloud[i], radius, parameters, escape)
+        else:
+            nan = False
+            square = 0.0
+            for j in range(dimension):
+                value = cloud[i, j]
+                if numpy.isnan(value):
+                    nan = True
+                    break
+                square += value*value
+            good = (not nan) and (square < threshold)
         keep[i] = good
         if good:
             count += 1
