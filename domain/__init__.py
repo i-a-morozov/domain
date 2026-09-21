@@ -102,7 +102,7 @@ class Configuration:
         retained axes store one period starting at lb[index]
         omitted axes use shortest periodic distance
     random: bool, default=False
-        random reference directions (projection always enables random directions)
+        random reference directions (projection and odd ray spaces force random directions)
     epsilon: float, default=1.0E-6
         numerical tolerance added to section half-widths
 
@@ -253,7 +253,7 @@ def collect(
 ) -> NDArray[float64]:
     """
     Collect streamed points
-    
+
     """
     options = {} if escape is None else {'escape': escape}
     geometry = Geometry(configuration, projection, periodic)
@@ -279,7 +279,7 @@ def project(
 ) -> int:
     """
     Update domains from streamed points
-    
+
     """
     options = {} if escape is None else {'escape': escape}
     geometry = Geometry(configuration, projection, periodic)
@@ -399,9 +399,9 @@ def grow_indicator(
         indicator selection threshold
     domain: Domain
         seeded domain to update in place
-    epochs: int, default=16
+    epochs: int, default=64
         maximum number of growth epochs
-    limit: int, default=128_000_000
+    limit: int, default=64_000_000
         stop once the number of marked cells exceeds this value
     verbose: bool, default=True
         print the epoch and current domain size
@@ -492,19 +492,20 @@ def compute(
         domain construction configuration
     parameters: NDArray[float64]
         additional parameters passed to `mapping`, `objective`, and `cost`
-    pairs: Sequence[tuple[int, int]]
-        ray-count pairs used in the boundary saturation loop
+    pairs: Sequence[int | tuple[int, int]]
+        integer random-ray counts or even-dimensional structured-count pairs;
+        odd ray spaces always use random directions and require integer counts
     mapping: Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]]
-        mapping mapping
+        state mapping
     objective: Callable[[NDArray[float64], NDArray[float64]], bool]
         stability objective used in the initial DA search
     cost: Optional[Callable[[NDArray[float64], NDArray[float64]], int]], default=None
         optional cost function
-    full: bool, default=True
+    full: bool, default=False
         flag to construct and update the full domain container
     complexity: bool, default=True
         flag to compute cost data when `cost` is provided
-    verbose: bool, default=False
+    verbose: bool, default=True
         verbose output flag
     initial: Optional[NDArray[float64]], default=None
         points used to seed the domains directly
@@ -518,14 +519,14 @@ def compute(
     if projection is not None or periodic is not None:
         configuration = replace(configuration, projection=geometry.projection, periodic=geometry.periodic)
     random = configuration.random if random is None else random
-    if geometry.active or random or boundary_origins is not None:
+    if geometry.active or random or len(geometry.axes) % 2 or boundary_origins is not None:
         from domain.construction import compute_geometry
         return compute_geometry(
-            configuration, 
-            parameters, 
-            pairs, 
-            mapping, 
-            objective, 
+            configuration,
+            parameters,
+            pairs,
+            mapping,
+            objective,
             cost,
             full,
             complexity,
@@ -673,8 +674,9 @@ def compute_indicator(
         domain construction configuration
     parameters: NDArray[float64]
         additional parameters passed to mappings, indicator, and cost
-    pairs: Sequence[tuple[int, int]]
-        ray-count pairs used in the boundary saturation loop
+    pairs: Sequence[int | tuple[int, int]]
+        integer random-ray counts or even-dimensional structured-count pairs;
+        odd ray spaces always use random directions and require integer counts
     factory: Callable
         indicator factory called as `factory(configuration.size, forward, inverse)`
     forward: Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]]
@@ -685,11 +687,11 @@ def compute_indicator(
         indicator threshold used to classify escaping initials
     cost: Optional[Callable[[NDArray[float64], NDArray[float64]], int]], default=None
         optional cost function
-    full: bool, default=True
+    full: bool, default=False
         flag to construct and update the full domain container
     complexity: bool, default=True
         flag to compute cost data when `cost` is provided
-    verbose: bool, default=False
+    verbose: bool, default=True
         verbose output flag
     initial: Optional[NDArray[float64]], default=None
         points used to seed the domains directly; when given, the initial
@@ -711,7 +713,7 @@ def compute_indicator(
     if projection is not None or periodic is not None:
         configuration = replace(configuration, projection=geometry.projection, periodic=geometry.periodic)
     random = configuration.random if random is None else random
-    if geometry.active or random or boundary_origins is not None:
+    if geometry.active or random or len(geometry.axes) % 2 or boundary_origins is not None:
         from domain.construction import compute_geometry
         return compute_geometry(
             configuration,
@@ -730,7 +732,7 @@ def compute_indicator(
             boundary_origins,
             metric=metric,
             indicator_threshold=threshold
-    )
+        )
     table = []
     costs = [] if (complexity and cost is not None) else None
     rads = []

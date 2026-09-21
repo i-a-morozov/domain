@@ -13,12 +13,19 @@ from domain.scan import orbit, scan
 from domain.volume import directions, rays, mean
 from domain import Result, project
 
+
 def reference(geometry, stages, random, seed):
+    """
+    Fixed references
+    Odd ray spaces use random directions and integer counts
+    
+    """
     dimension = len(geometry.axes)
+    random = bool(random or dimension % 2)
     result = []
     for stage, specification in enumerate(stages):
         if random:
-            if np.isscalar(specification):
+            if dimension % 2 or np.isscalar(specification):
                 count = int(specification)
             else:
                 n, m = specification
@@ -45,23 +52,26 @@ def boundary(domain, origins, directions):
 def retain(boundary, cloud, geometry, origins, missed, count):
     if not geometry.storage_periodic:
         return
+    origins = origins[missed == count]
+    if not len(origins):
+        return
     centers = cloud.construct
     keep = np.zeros(len(centers), dtype=bool)
-    for origin in origins[missed == count]:
+    for origin in origins:
         local = np.ones(len(centers), dtype=bool)
         for axis, period in geometry.storage_periodic:
             distance = (centers[:, axis] - origin[axis] + period/2) % period - period/2
-            local &= np.abs(distance) <= 0.5*cloud.cell[axis] + geometry.configuration.projection_epsilon
+            local &= np.abs(distance) <= 0.5*cloud.cell[axis] + geometry.configuration.epsilon
         keep |= local
     boundary.insert(cloud.keys[keep])
 
 
 def compute_geometry(
-    configuration, 
-    parameters, 
-    stages, 
-    mapping, 
-    objective, 
+    configuration,
+    parameters,
+    stages,
+    mapping,
+    objective,
     cost,
     full,
     complexity,
@@ -83,15 +93,15 @@ def compute_geometry(
     container = geometry.domain(configuration.dl) if full else None
     costs = [] if complexity and cost is not None else None
     result = Result(
-        [], 
-        costs, 
-        [], 
-        [], 
+        [],
+        costs,
+        [],
+        [],
         container,
         projection=geometry.projection,
         periodic=geometry.periodic,
         coordinates=tuple(int(i) for i in geometry.keep),
-        references=references, 
+        references=references,
         origins=origins,
         dimension=dimension
     )
@@ -140,16 +150,16 @@ def compute_geometry(
                         centers = domain.transform(rng.choice(domain.keys, configuration.nsamples))
                     else:
                         _, centers, _, _ = select(
-                            domain, 
+                            domain,
                             configuration.nsamples,
-                            bins_plane=configuration.bins_plane, 
+                            bins_plane=configuration.bins_plane,
                             bins_phase=configuration.bins_phase,
-                            threshold=configuration.phase_threshold, 
+                            threshold=configuration.phase_threshold,
                             alpha_plane=configuration.alpha_plane,
-                            alpha_phase=configuration.alpha_phase, 
+                            alpha_phase=configuration.alpha_phase,
                             boost=configuration.boost,
-                            delta=configuration.delta, 
-                            uniform=configuration.uniform, 
+                            delta=configuration.delta,
+                            uniform=configuration.uniform,
                             power=configuration.power
                         )
                     initials = geometry.lift(sample(configuration.npoints, configuration.scale*domain.cell, centers))

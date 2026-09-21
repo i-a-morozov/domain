@@ -48,7 +48,8 @@ class Domain:
     periodic : tuple, default=()
         (stored coordinate index, period) entries
         Each periodic grid contains exactly N unique cells centered at lb + range(N)*cell
-        N is the ceiling of period and cell is adjusted to period/N
+        N is ceil(period/requested cell width), allowing roundoff near integers
+        The actual cell width is adjusted to period/N
         ub on that axis becomes lb + period
     coordinates : tuple, default=()
         optional original map index for each stored coordinate
@@ -93,10 +94,10 @@ class Domain:
         Insert a sequence of ids into the sparse set (kept sorted/unique)
     update(points)
         insert points by binning to ids first
-    volume(n, m, center)
-        compute equivalent hypersphere radius and hypervolume via ray quadrature
-    boundary(n, m, center)
-        return first-hit occupied cell ids for rays (one id per ray, -1 if none)
+    volume(n, m, center, directions, factors)
+        compute Euclidean radius and volume for nonperiodic domains only
+    boundary(n, m, center, directions, *, radius=None)
+        return first-hit cell ids within the search horizon (-1 for no hit)
 
     """
     lb: NDArray[float64]
@@ -197,16 +198,29 @@ class Domain:
         return self.transform(self.list)
 
     def volume(self, n:int, m:int, center:NDArray[float64], directions:NDArray[float64], factors:NDArray[float64]) -> Tuple[float64, float64]:
+        """
+        Euclidean radius and volume for nonperiodic domains only
+        Periodic charts are unsupported
+    
+        """
         return volume(self.dimension, n, m, self.origin, self.counts, self.strides, self.cell, center, directions, factors, self.list)
     
-    def boundary(self, n:int, m:int, center:NDArray[float64], directions:NDArray[float64]) -> Tuple[NDArray[int64], NDArray[float64], NDArray[float64]]:
+    def boundary(self, n:int, m:int, center:NDArray[float64], directions:NDArray[float64], *, radius=None) -> Tuple[NDArray[int64], NDArray[float64], NDArray[float64]]:
+        """
+        First occupied cells along rays, optionally capped at radius
+        
+        Directions are unit vectors
+        With radius=None, use the existing farthest-box-corner distance
+        Periodic rays can need a larger radius to reach a cell across the seam
+
+        """
         if self.periodic:
             periods = numpy.zeros(self.dimension, dtype=float64)
             for axis, period in self.periodic:
                 periods[axis] = period
-            keys, radii, points = boundary(self.dimension, n, m, self.origin, self.counts, self.strides, self.cell, self.wrap(center, grid=True), directions, self.list, periods)
+            keys, radii, points = boundary(self.dimension, n, m, self.origin, self.counts, self.strides, self.cell, self.wrap(center, grid=True), directions, self.list, periods, radius)
             return keys, radii, self.wrap(points)
-        return boundary(self.dimension, n, m, self.origin, self.counts, self.strides, self.cell, center, directions, self.list)
+        return boundary(self.dimension, n, m, self.origin, self.counts, self.strides, self.cell, center, directions, self.list, radius=radius)
 
 @njit
 def cumprod(
@@ -949,7 +963,8 @@ def boundary(
     center:NDArray[float64],
     directions:NDArray[float64],
     keys:NDArray[int64],
-    periods=None
+    periods=None,
+    radius=None
 ) -> Tuple[NDArray[int64], NDArray[float64], NDArray[float64]]:
     """
     Compute first-hit occupied cell ids for all rays (boundary)
@@ -990,14 +1005,14 @@ def boundary(
         dc = corner[i] - center[i]
         do = center[i] - origin[i]
         square += dc*dc if dc*dc > do*do else do*do
-    limit = numpy.sqrt(square)
+    limit = numpy.sqrt(square) if radius is None else radius
     count = len(directions)
     boundary = numpy.empty(count, dtype=int64)
     radii = numpy.empty(count, dtype=float64)
     points = numpy.empty((count, dimension), dtype=float64)
     for i in prange(count):
-        index, radius, point = intersection(origin, counts, stride, cell, center, directions[i], keys, limit, periods)
+        index, hit_radius, point = intersection(origin, counts, stride, cell, center, directions[i], keys, limit, periods)
         boundary[i] = index
-        radii[i] = radius
+        radii[i] = hit_radius
         points[i] = point
     return boundary, radii, points

@@ -12,7 +12,7 @@ import numpy as np
 from domain.domain import Domain
 
 
-def specification(entries, dimension, name):
+def specification(entries):
     entries = () if entries is None else tuple(entries)
     result = []
     for index, value in entries:
@@ -27,8 +27,8 @@ class Geometry:
     """
     def __init__(self, configuration, projection=None, periodic=None):
         self.configuration = configuration
-        self.projection = specification(configuration.projection if projection is None else projection, configuration.dimension, 'projection')
-        self.periodic = specification(configuration.periodic if periodic is None else periodic, configuration.dimension, 'periodic')
+        self.projection = specification(configuration.projection if projection is None else projection)
+        self.periodic = specification(configuration.periodic if periodic is None else periodic)
         excluded = {i for i, _ in self.projection}
         self.keep = np.array([i for i in range(configuration.dimension) if i not in excluded], dtype=int)
         self.dimension = len(self.keep)
@@ -81,7 +81,7 @@ class Geometry:
             if index in self.periods:
                 period = self.periods[index]
                 distance = (distance + period/2) % period - period/2
-            keep &= np.abs(distance) < width*self.configuration.dl[index] + self.configuration.projection_epsilon
+            keep &= np.abs(distance) < width*self.configuration.dl[index] + self.configuration.epsilon
         return np.ascontiguousarray(self.wrap(points[keep])[:, self.keep])
 
     def embed_directions(self, directions):
