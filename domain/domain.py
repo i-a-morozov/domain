@@ -6,6 +6,7 @@ from typing import Iterable
 from typing import Tuple
 
 from dataclasses import dataclass
+from dataclasses import field
 
 from numpy import bool_
 from numpy import int64
@@ -44,6 +45,13 @@ class Domain:
         upper bounds per dimension, shape (dimension, )
     cell : float | NDArray[float64]
         scalar cell size for a cubic grid or one cell size per dimension
+    periodic : tuple, default=()
+        (stored coordinate index, period) entries
+        Each periodic grid contains exactly N unique cells centered at lb + range(N)*cell
+        N is the ceiling of period and cell is adjusted to period/N
+        ub on that axis becomes lb + period
+    coordinates : tuple, default=()
+        optional original map index for each stored coordinate
 
     Attributes
     ----------
@@ -99,6 +107,8 @@ class Domain:
     strides: NDArray[int64] = None
     total: int = 0
     keys: NDArray[int64] = None
+    periodic: tuple = field(default=(), kw_only=True)
+    coordinates: tuple = field(default=(), kw_only=True)
 
     def __post_init__(self):
         lb = numpy.asarray(self.lb, dtype=float64)
@@ -107,7 +117,28 @@ class Domain:
         self.ub = numpy.ascontiguousarray(ub)
         self.cell = array(self.cell, len(lb))
         self.origin, self.counts, self.strides, self.total = box(self.lb, self.ub, self.cell)
+        self.periodic = tuple(self.periodic or ())
+        if self.periodic:
+            self.lb = self.lb.copy()
+            self.ub = self.ub.copy()
+            for axis, period in self.periodic:
+                ratio = period/self.cell[axis]
+                nearest = numpy.rint(ratio)
+                count = int(nearest if numpy.isclose(ratio, nearest, rtol=1e-12, atol=1e-12) else numpy.ceil(ratio))
+                self.counts[axis] = max(1, count)
+                self.cell[axis] = period/self.counts[axis]
+                self.origin[axis] = self.lb[axis] - 0.5*self.cell[axis]
+                self.ub[axis] = self.lb[axis] + period
+            self.strides = cumprod(self.counts)
+            self.total = int(numpy.prod(self.counts))
         self.keys = numpy.zeros((0, ), dtype=int64)
+
+    def wrap(self, points, *, grid=False):
+        points = numpy.array(points, dtype=float64, copy=True)
+        for axis, period in self.periodic:
+            lower = self.origin[axis] if grid else self.lb[axis]
+            points[..., axis] = lower + (points[..., axis] - lower) % period
+        return numpy.ascontiguousarray(points)
 
     @property
     def dimension(self) -> int:
@@ -119,6 +150,8 @@ class Domain:
 
     def index(self, points:NDArray[float64]) -> NDArray[int64]:        
         points = numpy.ascontiguousarray(points, dtype=float64)
+        if self.periodic:
+            points = self.wrap(points, grid=True)
         return index(points, self.origin, self.counts, self.strides, self.cell)
 
     def convert(self, keys:NDArray[int64]) -> NDArray[int64]:
@@ -127,6 +160,14 @@ class Domain:
 
     def outer(self, keys:NDArray[int64]) -> NDArray[bool_]:
         keys = numpy.ascontiguousarray(keys, dtype=int64)
+        if self.periodic:
+            coordinates = self.convert(keys)
+            selected = numpy.zeros(len(keys), dtype=bool_)
+            periodic = {axis for axis, _ in self.periodic}
+            for axis in range(self.dimension):
+                if axis not in periodic:
+                    selected |= (coordinates[:, axis] == 0) | (coordinates[:, axis] == self.counts[axis] - 1)
+            return selected
         return outer(keys, self.counts, self.strides)
 
     def transform(self, keys:NDArray[int64]) -> NDArray[float64]:
@@ -159,6 +200,12 @@ class Domain:
         return volume(self.dimension, n, m, self.origin, self.counts, self.strides, self.cell, center, directions, factors, self.list)
     
     def boundary(self, n:int, m:int, center:NDArray[float64], directions:NDArray[float64]) -> Tuple[NDArray[int64], NDArray[float64], NDArray[float64]]:
+        if self.periodic:
+            periods = numpy.zeros(self.dimension, dtype=float64)
+            for axis, period in self.periodic:
+                periods[axis] = period
+            keys, radii, points = boundary(self.dimension, n, m, self.origin, self.counts, self.strides, self.cell, self.wrap(center, grid=True), directions, self.list, periods)
+            return keys, radii, self.wrap(points)
         return boundary(self.dimension, n, m, self.origin, self.counts, self.strides, self.cell, center, directions, self.list)
 
 @njit
@@ -644,7 +691,8 @@ def intersection(
     start:NDArray[float64],
     direction: NDArray[float64],
     keys:NDArray[int64],
-    radius:float
+    radius:float,
+    periods=None
 ) -> Tuple[int64, float64, NDArray[float64]]:
     """
     Ray traversal through the grid to the first occupied cell (DDA stepping)
@@ -675,7 +723,24 @@ def intersection(
     """
     dimension = len(origin)
     point = numpy.empty(dimension, dtype=float64)
-    hit, enter, _ = interval(origin, counts, cell, start, direction, radius)
+    if periods is None:
+        hit, enter, _ = interval(origin, counts, cell, start, direction, radius)
+    else:
+        hit, enter, leave = True, 0.0, radius
+        for i in range(dimension):
+            if periods[i] > 0:
+                continue
+            left = origin[i]
+            right = left + counts[i]*cell[i]
+            if direction[i] == 0:
+                if start[i] < left or start[i] > right:
+                    hit = False
+            else:
+                a = (left - start[i])/direction[i]
+                b = (right - start[i])/direction[i]
+                enter = max(enter, min(a, b))
+                leave = min(leave, max(a, b))
+        hit = hit and enter <= leave
     if not hit:
         for k in range(dimension):
             point[k] = start[k] + radius*direction[k]
@@ -686,12 +751,18 @@ def intersection(
         w = cell[i]
         x = start[i] + total*direction[i]
         j = numpy.floor((x - origin[i]) / w)
-        if j < 0:
-            j = 0
-        if j >= counts[i]:
-            j = counts[i] - 1
+        if periods is None or periods[i] == 0:
+            if j < 0:
+                j = 0
+            if j >= counts[i]:
+                j = counts[i] - 1
         idx[i] = int64(j)
-    key = position(idx, strides)
+    wrapped = idx.copy()
+    if periods is not None:
+        for i in range(dimension):
+            if periods[i] > 0:
+                wrapped[i] %= counts[i]
+    key = position(wrapped, strides)
     if member(keys, key):
         for k in range(dimension):
             point[k] = start[k] + total*direction[k]
@@ -745,7 +816,9 @@ def intersection(
                         use = True
                         value += steps[i]
                     trial[i] = value
-                    if value < 0 or value >= counts[i]:
+                    if periods is not None and periods[i] > 0:
+                        trial[i] %= counts[i]
+                    elif value < 0 or value >= counts[i]:
                         valid = False
                         break
                 if not valid or not use:
@@ -763,14 +836,18 @@ def intersection(
         for i in range(dimension):
             if tied[i]:
                 idx[i] += steps[i]
-                if idx[i] < 0 or idx[i] >= counts[i]:
+                if (periods is None or periods[i] == 0) and (idx[i] < 0 or idx[i] >= counts[i]):
                     exited = True
             limit[i] += delta[i] if tied[i] else 0.0
         if exited:
             for k in range(dimension):
                 point[k] = start[k] + total*direction[k]
             return int64(-1), total, point
-        key = position(idx, strides)
+        for i in range(dimension):
+            wrapped[i] = idx[i]
+            if periods is not None and periods[i] > 0:
+                wrapped[i] %= counts[i]
+        key = position(wrapped, strides)
         if member(keys, key):
             for k in range(dimension):
                 point[k] = start[k] + total*direction[k]
@@ -871,7 +948,8 @@ def boundary(
     cell:NDArray[float64],
     center:NDArray[float64],
     directions:NDArray[float64],
-    keys:NDArray[int64]
+    keys:NDArray[int64],
+    periods=None
 ) -> Tuple[NDArray[int64], NDArray[float64], NDArray[float64]]:
     """
     Compute first-hit occupied cell ids for all rays (boundary)
@@ -918,7 +996,7 @@ def boundary(
     radii = numpy.empty(count, dtype=float64)
     points = numpy.empty((count, dimension), dtype=float64)
     for i in prange(count):
-        index, radius, point = intersection(origin, counts, stride, cell, center, directions[i], keys, limit)
+        index, radius, point = intersection(origin, counts, stride, cell, center, directions[i], keys, limit, periods)
         boundary[i] = index
         radii[i] = radius
         points[i] = point

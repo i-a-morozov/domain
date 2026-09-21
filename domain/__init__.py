@@ -10,6 +10,7 @@ from typing import Sequence
 
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 
 import numpy
 from numpy import float64
@@ -30,8 +31,9 @@ from domain.scan import scan
 from domain.volume import directions
 from domain.volume import rays
 from domain.volume import mean
+from domain.projection import Geometry
 
-__version__ = '0.1.3'
+__version__ = '0.1.5'
 
 
 @dataclass
@@ -93,6 +95,16 @@ class Configuration:
         random seed offset for initial random directions
     batch: int, default=512
         maximum number of full orbits held in memory at once
+    projection: tuple, default=()
+        omitted original-coordinate indices and half-widths in base dl units
+    periodic: tuple, default=()
+        original-coordinate indices and periods
+        retained axes store one period starting at lb[index]
+        omitted axes use shortest periodic distance
+    random: bool, default=False
+        random reference directions (projection always enables random directions)
+    epsilon: float, default=1.0E-6
+        numerical tolerance added to section half-widths
 
     """
     lb: NDArray[float64]
@@ -121,6 +133,10 @@ class Configuration:
     power: float = 1.0
     seed: Optional[int] = None
     batch: int = 512
+    projection: tuple = ()
+    periodic: tuple = ()
+    random: bool = False
+    epsilon: float = 1.0E-6
 
     def __post_init__(self) -> None:
         self.lb = numpy.asarray(self.lb, dtype=float64)
@@ -159,6 +175,13 @@ class Result:
         resulting boundary domains
     container: Optional[Domain]
         optional full domain container
+    projection, periodic, coordinates:
+        section, original-index periodic metadata and stored-column map
+    references, origins:
+        reduced-space reference rays and origins for the new construction modes
+        reference directions are reused across rounds, levels and epochs
+    dimension:
+        dimension of the nonperiodic ray family
 
     """
     data: list
@@ -166,6 +189,12 @@ class Result:
     rads: list
     cells: list[Domain]
     container: Optional[Domain]
+    projection: tuple = ()
+    periodic: tuple = ()
+    coordinates: tuple = ()
+    references: list = field(default_factory=list)
+    origins: Optional[NDArray[float64]] = None
+    dimension: Optional[int] = None
 
 
 def batches(
@@ -175,21 +204,38 @@ def batches(
     configuration:Configuration,
     escaping:bool=False,
     cut:Optional[float]=None, *,
-    escape:Optional[Escape]=None
+    escape:Optional[Escape]=None,
+    projection=None,
+    periodic=None
 ) -> Iterator[NDArray[float64]]:
     """
     Stream orbit points using the generator's escape criterion
 
+    Initials and generator are always full-map dimensional
+    Projection/periodic options override the configuration
+    Filter full states before section selection and periodic wrapping
+    In projection mode include selected trajectory initials as well as iterates
+
     """
+    geometry = Geometry(configuration, projection, periodic)
     radius = configuration.cut if cut is None else float(cut)
     for start in range(0, len(initial), configuration.batch):
         local = numpy.ascontiguousarray(initial[start:start + configuration.batch])
         buffer = numpy.empty((len(local), configuration.size, configuration.dimension), dtype=float64)
         scan(local, buffer, generator, parameters)
         if escaping:
-            buffer = buffer[mask(buffer, configuration.threshold, escape=escape, parameters=parameters)]
+            lost = mask(buffer, configuration.threshold, escape=escape, parameters=parameters)
+            buffer = buffer[lost]
+            local = local[lost]
         if len(buffer):
+            if geometry.projection:
+                points = filter(local, radius, escape=escape, parameters=parameters)
+                points = geometry.project(points)
+                if len(points):
+                    yield points
             points = filter(buffer.reshape(-1, configuration.dimension), radius, escape=escape, parameters=parameters)
+            if geometry.active:
+                points = geometry.project(points)
             if len(points):
                 yield points
 
@@ -201,16 +247,21 @@ def collect(
     configuration:Configuration,
     escaping:bool=False,
     cut:Optional[float]=None, *,
-    escape:Optional[Escape]=None
+    escape:Optional[Escape]=None,
+    projection=None,
+    periodic=None
 ) -> NDArray[float64]:
     """
     Collect streamed points
     
     """
     options = {} if escape is None else {'escape': escape}
+    geometry = Geometry(configuration, projection, periodic)
+    if geometry.active or projection is not None or periodic is not None:
+        options.update(projection=geometry.projection, periodic=geometry.periodic)
     chunks = list(batches(initial, generator, parameters, configuration, escaping=escaping, cut=cut, **options))
     if not chunks:
-        return numpy.empty((0, configuration.dimension), dtype=float64)
+        return numpy.empty((0, geometry.dimension), dtype=float64)
     return numpy.vstack(chunks)
 
 
@@ -223,12 +274,17 @@ def project(
     escaping:bool=False,
     cut:Optional[float]=None, *,
     escape:Optional[Escape]=None,
+    projection=None,
+    periodic=None
 ) -> int:
     """
     Update domains from streamed points
     
     """
     options = {} if escape is None else {'escape': escape}
+    geometry = Geometry(configuration, projection, periodic)
+    if geometry.active or projection is not None or periodic is not None:
+        options.update(projection=geometry.projection, periodic=geometry.periodic)
     count = 0
     for points in batches(initial, generator, parameters, configuration, escaping=escaping, cut=cut, **options):
         for domain in domains:
@@ -245,7 +301,9 @@ def grow(
     epochs:int=64,
     limit:int=64_000_000,
     verbose:bool=True, *,
-    escape:Optional[Escape]=None
+    escape:Optional[Escape]=None,
+    projection=None,
+    periodic=None
 ) -> Domain:
     """
     Grow an escape-based transport domain
@@ -274,6 +332,9 @@ def grow(
     """
     options = {} if escape is None else {'escape': escape}
     generator = orbit(configuration.size, configuration.threshold, mapping, **options)
+    geometry = Geometry(configuration, projection, periodic)
+    if geometry.active or projection is not None or periodic is not None:
+        options.update(projection=geometry.projection, periodic=geometry.periodic)
     for epoch in range(epochs):
         if domain.size == 0:
             break
@@ -281,6 +342,8 @@ def grow(
         indices = numpy.random.choice(domain.list, configuration.nsamples)
         centers = domain.transform(indices)
         initial = sample(configuration.npoints, configuration.scale*domain.cell, centers)
+        if geometry.active:
+            initial = geometry.lift(initial)
         batches = (len(initial) + configuration.batch - 1)//configuration.batch
         if verbose:
             print(
@@ -310,10 +373,12 @@ def grow_indicator(
     inverse:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]],
     threshold:float,
     domain:Domain,
-    epochs:int=16,
-    limit:int=128_000_000,
+    epochs:int=64,
+    limit:int=64_000_000,
     verbose:bool=True, *,
     escape:Optional[Escape]=None,
+    projection=None,
+    periodic=None
 ) -> Domain:
     """
     Grow an indicator-based transport domain
@@ -351,6 +416,9 @@ def grow_indicator(
     options = {} if escape is None else {'escape': escape}
     orbit_forward = orbit(configuration.size, configuration.threshold, forward, **options)
     orbit_inverse = orbit(configuration.size, configuration.threshold, inverse, **options)
+    geometry = Geometry(configuration, projection, periodic)
+    if geometry.active or projection is not None or periodic is not None:
+        options.update(projection=geometry.projection, periodic=geometry.periodic)
     for epoch in range(epochs):
         if domain.size == 0:
             break
@@ -358,6 +426,8 @@ def grow_indicator(
         indices = numpy.random.choice(domain.list, configuration.nsamples)
         centers = domain.transform(indices)
         initial = sample(configuration.npoints, configuration.scale*domain.cell, centers)
+        if geometry.active:
+            initial = geometry.lift(initial)
         if verbose:
             print(
                 f'{epoch + 1:02d} start'
@@ -399,7 +469,7 @@ def grow_indicator(
 def compute(
     configuration:Configuration,
     parameters:NDArray[float64],
-    pairs:List[tuple[int, int]],
+    pairs:Sequence[int | tuple[int, int]],
     mapping:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]],
     objective:Callable[[NDArray[float64], NDArray[float64]], bool],
     cost:Optional[Callable[[NDArray[float64], NDArray[float64]], int]]=None,
@@ -407,7 +477,11 @@ def compute(
     complexity:bool=True,
     verbose:bool=True,
     initial:Optional[NDArray[float64]]=None, *,
-    escape:Optional[Escape]=None
+    escape:Optional[Escape]=None,
+    projection=None,
+    periodic=None,
+    random:Optional[bool]=None,
+    boundary_origins:Optional[NDArray[float64]]=None,
 ) -> Result:
     """
     Run domain construction loop
@@ -440,6 +514,28 @@ def compute(
     Result
 
     """
+    geometry = Geometry(configuration, projection, periodic)
+    if projection is not None or periodic is not None:
+        configuration = replace(configuration, projection=geometry.projection, periodic=geometry.periodic)
+    random = configuration.random if random is None else random
+    if geometry.active or random or boundary_origins is not None:
+        from domain.construction import compute_geometry
+        return compute_geometry(
+            configuration, 
+            parameters, 
+            pairs, 
+            mapping, 
+            objective, 
+            cost,
+            full,
+            complexity,
+            verbose,
+            initial,
+            escape,
+            geometry,
+            random,
+            boundary_origins
+        )
     table = []
     costs = [] if (complexity and cost is not None) else None
     rads = []
@@ -552,7 +648,7 @@ def compute(
 def compute_indicator(
     configuration:Configuration,
     parameters:NDArray[float64],
-    pairs:List[tuple[int, int]],
+    pairs:Sequence[int | tuple[int, int]],
     factory:Callable[[int, Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]], Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]]], Callable[[NDArray[float64], NDArray[float64]], float64]],
     forward:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]],
     inverse:Callable[[NDArray[float64], NDArray[float64]], NDArray[float64]],
@@ -562,7 +658,11 @@ def compute_indicator(
     complexity:bool=True,
     verbose:bool=True,
     initial:Optional[NDArray[float64]]=None, *,
-    escape:Optional[Escape]=None
+    escape:Optional[Escape]=None,
+    projection=None,
+    periodic=None,
+    random:Optional[bool]=None,
+    boundary_origins:Optional[NDArray[float64]]=None
 ) -> Result:
     """
     Run domain construction loop using a scalar indicator threshold
@@ -604,12 +704,33 @@ def compute_indicator(
     generator = orbit(configuration.size, configuration.threshold, forward, **options)
 
     @njit
-    def objective(
-        state:NDArray[float64],
-        parameters:NDArray[float64]
-    ) -> bool:
+    def objective(state:NDArray[float64], parameters:NDArray[float64]) -> bool:
         return metric(state, parameters) <= threshold
 
+    geometry = Geometry(configuration, projection, periodic)
+    if projection is not None or periodic is not None:
+        configuration = replace(configuration, projection=geometry.projection, periodic=geometry.periodic)
+    random = configuration.random if random is None else random
+    if geometry.active or random or boundary_origins is not None:
+        from domain.construction import compute_geometry
+        return compute_geometry(
+            configuration,
+            parameters,
+            pairs,
+            forward,
+            objective,
+            cost,
+            full,
+            complexity,
+            verbose,
+            initial,
+            escape,
+            geometry,
+            random,
+            boundary_origins,
+            metric=metric,
+            indicator_threshold=threshold
+    )
     table = []
     costs = [] if (complexity and cost is not None) else None
     rads = []
