@@ -53,6 +53,8 @@ class Domain:
         ub on that axis becomes lb + period
     coordinates : tuple, default=()
         optional original map index for each stored coordinate
+    density : bool, default=False
+        track the number of points visiting each occupied cell
 
     Attributes
     ----------
@@ -66,6 +68,8 @@ class Domain:
         total number of cells in the full grid
     keys : NDArray[int64]
         sorted, unique flattened indices of filled cells
+    activations : NDArray[int64] | None
+        point-visit counts aligned with keys when density=True
 
     Properties
     ----------
@@ -92,6 +96,7 @@ class Domain:
         map flattened grid cell indices to cell-center coordinates
     insert(ids)
         Insert a sequence of ids into the sparse set (kept sorted/unique)
+        With density=True, count every occurrence, including previously marked cells
     update(points)
         insert points by binning to ids first
     volume(n, m, center, directions, factors)
@@ -110,6 +115,8 @@ class Domain:
     keys: NDArray[int64] = None
     periodic: tuple = field(default=(), kw_only=True)
     coordinates: tuple = field(default=(), kw_only=True)
+    density: bool = field(default=False, kw_only=True)
+    activations: NDArray[int64] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         lb = numpy.asarray(self.lb, dtype=float64)
@@ -133,6 +140,7 @@ class Domain:
             self.strides = cumprod(self.counts)
             self.total = int(numpy.prod(self.counts))
         self.keys = numpy.zeros((0, ), dtype=int64)
+        self.activations = numpy.zeros((0, ), dtype=int64) if self.density else None
 
     def wrap(self, points, *, grid=False):
         points = numpy.array(points, dtype=float64, copy=True)
@@ -176,7 +184,16 @@ class Domain:
         return transform(keys, self.origin, self.counts, self.strides, self.cell)
 
     def insert(self, keys:Iterable[int]) -> None:
-        self.keys = numpy.union1d(self.keys, keys)
+        if not self.density:
+            self.keys = numpy.union1d(self.keys, keys)
+            return
+        incoming, counts = numpy.unique(numpy.asarray(keys, dtype=int64), return_counts=True)
+        merged = numpy.union1d(self.keys, incoming)
+        activations = numpy.zeros(len(merged), dtype=int64)
+        activations[numpy.searchsorted(merged, self.keys)] = self.activations
+        activations[numpy.searchsorted(merged, incoming)] += counts
+        self.keys = merged
+        self.activations = activations
 
     def update(self, points:NDArray[float64]) -> None:
         keys = self.index(points)
