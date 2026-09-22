@@ -93,8 +93,8 @@ class Configuration:
         score power
     seed: Optional[int], default=None
         random seed offset for initial random directions
-    batch: int, default=512
-        maximum number of full orbits held in memory at once
+    batch: Optional[int], default=512
+        maximum number of full orbits held in memory at once, use None to skip batching
     projection: tuple, default=()
         omitted original-coordinate indices and half-widths in base dl units
     periodic: tuple, default=()
@@ -132,7 +132,7 @@ class Configuration:
     uniform: float = 0.05
     power: float = 1.0
     seed: Optional[int] = None
-    batch: int = 512
+    batch: Optional[int] = 512
     projection: tuple = ()
     periodic: tuple = ()
     random: bool = False
@@ -143,7 +143,10 @@ class Configuration:
         self.ub = numpy.asarray(self.ub, dtype=float64)
         self.center = numpy.asarray(self.center, dtype=float64)
         self.dl = array(self.dl, self.dimension)
-        self.batch = int(self.batch)
+        if self.batch is not None:
+            self.batch = int(self.batch)
+            if self.batch <= 0:
+                raise ValueError("batch must be a positive integer or None")
 
     @property
     def dimension(self) -> int:
@@ -219,8 +222,9 @@ def batches(
     """
     geometry = Geometry(configuration, projection, periodic)
     radius = configuration.cut if cut is None else float(cut)
-    for start in range(0, len(initial), configuration.batch):
-        local = numpy.ascontiguousarray(initial[start:start + configuration.batch])
+    batch = max(1, len(initial)) if configuration.batch is None else configuration.batch
+    for start in range(0, len(initial), batch):
+        local = numpy.ascontiguousarray(initial[start:start + batch])
         buffer = numpy.empty((len(local), configuration.size, configuration.dimension), dtype=float64)
         scan(local, buffer, generator, parameters)
         if escaping:
@@ -344,7 +348,7 @@ def grow(
         initial = sample(configuration.npoints, configuration.scale*domain.cell, centers)
         if geometry.active:
             initial = geometry.lift(initial)
-        batches = (len(initial) + configuration.batch - 1)//configuration.batch
+        batches = (int(bool(len(initial))) if configuration.batch is None else (len(initial) + configuration.batch - 1)//configuration.batch)
         if verbose:
             print(
                 f'{epoch + 1:02d} start'
@@ -445,7 +449,7 @@ def grow_indicator(
             | (values_forward_inverse > threshold)
             | (values_inverse_forward > threshold)
         ]
-        batches = (len(selected) + configuration.batch - 1)//configuration.batch
+        batches = (int(bool(len(selected))) if configuration.batch is None else (len(selected) + configuration.batch - 1)//configuration.batch)
         if verbose:
             print(
                 f'   selected {len(selected):8d}'
