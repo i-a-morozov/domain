@@ -657,9 +657,9 @@ def compute(
                     if verbose:
                         total = 0 if container is None else container.size
                         print(f'{i + 1:02d}', f'{domain.size:12d}', f'{flag:12d}', f'{100*flag/len(ds):12.2f}', f'{total:12d}', radius)
-                    flag = change(previous, radius, configuration.convergence)
+                    stable_radius = change(previous, radius, configuration.convergence)
                     previous = radius
-                    if flag <= (1.0 - configuration.termination)*len(ds) and flag:
+                    if flag <= (1.0 - configuration.termination)*len(ds) and stable_radius:
                         break
             if verbose:
                 print()
@@ -859,9 +859,9 @@ def compute_indicator(
                     if verbose:
                         total = 0 if container is None else container.size
                         print(f'{i + 1:02d}', f'{domain.size:12d}', f'{flag:12d}', f'{100*flag/len(ds):12.2f}', f'{total:12d}', radius)
-                    flag = change(previous, radius, configuration.convergence)
+                    test = change(previous, radius, configuration.convergence)
                     previous = radius
-                    if flag <= (1.0 - configuration.termination)*len(ds) and flag:
+                    if flag <= (1.0 - configuration.termination)*len(ds) and test:
                         break
             if verbose:
                 print()
