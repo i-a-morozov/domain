@@ -103,6 +103,8 @@ class Configuration:
         omitted axes use shortest periodic distance
     random: bool, default=False
         random reference directions (projection and odd ray spaces force random directions)
+    convergence: Optional[float], default=None
+        additional radius-change tolerance in percent
     epsilon: float, default=1.0E-6
         numerical tolerance added to section half-widths
 
@@ -137,6 +139,7 @@ class Configuration:
     periodic: tuple = ()
     random: bool = False
     epsilon: float = 1.0E-6
+    convergence: Optional[float] = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         self.lb = numpy.asarray(self.lb, dtype=float64)
@@ -147,6 +150,11 @@ class Configuration:
             self.batch = int(self.batch)
             if self.batch <= 0:
                 raise ValueError("batch must be a positive integer or None")
+
+        if self.convergence is not None:
+            self.convergence = float(self.convergence)
+            if not numpy.isfinite(self.convergence) or self.convergence <= 0:
+                raise ValueError("convergence must be a finite positive percentage or None")
 
     @property
     def dimension(self) -> int:
@@ -159,6 +167,16 @@ class Configuration:
     @property
     def cells(self) -> list[NDArray[float64]]:
         return [float(ld)*self.dl for ld in self.lds]
+
+
+def change(previous, current, tolerance):
+    if tolerance is None:
+        return True
+    if previous is None or not numpy.isfinite(previous) or not numpy.isfinite(current):
+        return False
+    if previous <= 0 or current <= 0:
+        return False
+    return 100*abs(previous/current - 1) < tolerance
 
 
 @dataclass
@@ -601,6 +619,7 @@ def compute(
             cell = domain.cell
             for pair in pairs:
                 ds, _ = rays(domain.dimension, *pair)
+                previous = None
                 for i in range(configuration.nrounds):
                     indices, centers, probabilities, statistics = select(
                         domain,
@@ -638,7 +657,9 @@ def compute(
                     if verbose:
                         total = 0 if container is None else container.size
                         print(f'{i + 1:02d}', f'{domain.size:12d}', f'{flag:12d}', f'{100*flag/len(ds):12.2f}', f'{total:12d}', radius)
-                    if flag <= (1.0 - configuration.termination)*len(ds):
+                    flag = change(previous, radius, configuration.convergence)
+                    previous = radius
+                    if flag <= (1.0 - configuration.termination)*len(ds) and flag:
                         break
             if verbose:
                 print()
@@ -797,6 +818,7 @@ def compute_indicator(
             cell = domain.cell
             for pair in pairs:
                 ds, _ = rays(domain.dimension, *pair)
+                previous = None
                 for i in range(configuration.nrounds):
                     indices, centers, probabilities, statistics = select(
                         domain,
@@ -837,7 +859,9 @@ def compute_indicator(
                     if verbose:
                         total = 0 if container is None else container.size
                         print(f'{i + 1:02d}', f'{domain.size:12d}', f'{flag:12d}', f'{100*flag/len(ds):12.2f}', f'{total:12d}', radius)
-                    if flag <= (1.0 - configuration.termination)*len(ds):
+                    flag = change(previous, radius, configuration.convergence)
+                    previous = radius
+                    if flag <= (1.0 - configuration.termination)*len(ds) and flag:
                         break
             if verbose:
                 print()

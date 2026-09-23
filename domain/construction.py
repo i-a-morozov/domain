@@ -11,7 +11,7 @@ from domain.da import da
 from domain.sample import sample, select
 from domain.scan import orbit, scan
 from domain.volume import directions, rays, mean
-from domain import Result, project
+from domain import Result, project, change
 
 
 def reference(geometry, stages, random, seed):
@@ -143,6 +143,7 @@ def compute_geometry(
         for level, requested_cell in enumerate(configuration.cells):
             domain = domains[level]
             for ds in references:
+                previous = None
                 for round_index in range(configuration.nrounds):
                     if not domain.size:
                         break
@@ -182,7 +183,9 @@ def compute_geometry(
                         local_cost.append(counts)
                     if verbose:
                         print(f'{round_index + 1:03d} {domain.size:12d} {missed.sum():12d} worst level missed: {100*missed.max()/len(ds):.2f}% {radius:.6f}', flush=True)
-                    if np.all(missed <= (1 - configuration.termination)*len(ds)):
+                    flag = change(previous, radius, configuration.convergence)
+                    previous = radius
+                    if np.all(missed <= (1 - configuration.termination)*len(ds)) and flag:
                         break
             result.cells.append(domain)
             result.data.append(list(data))
