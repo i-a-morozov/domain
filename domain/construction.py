@@ -10,8 +10,8 @@ import numpy as np
 from domain.da import da
 from domain.sample import sample, select
 from domain.scan import orbit, scan
-from domain.volume import directions, rays, mean
-from domain import Result, project, change
+from domain.volume import directions, rays
+from domain import Result, project, change, advance
 
 
 def reference(geometry, stages, random, seed):
@@ -165,10 +165,13 @@ def compute_geometry(
                         )
                     initials = geometry.lift(sample(configuration.npoints, configuration.scale*domain.cell, centers))
                     targets = domains[level:] if container is None else [*domains[level:], container]
-                    deposit(initials, targets)
-                    keys, radii, missed = boundary(domain, origins, ds)
+                    keys, radii, missed, radius, processed = advance(
+                        initials,
+                        configuration,
+                        lambda local: deposit(local, targets),
+                        lambda: boundary(domain, origins, ds), previous, dimension, len(ds)
+                    )
                     hit = keys >= 0
-                    radius = float(mean(dimension, radii[hit])) if np.any(hit) else 0.0
                     shell = geometry.domain(requested_cell)
                     shell.insert(np.unique(keys[hit]))
                     retain(shell, domain, geometry, origins, missed, len(ds))
@@ -178,8 +181,8 @@ def compute_geometry(
                     data.append(np.asarray([int(missed.sum()), domain.size, len(origins)*len(ds)]))
                     rads.append(radius)
                     if costs is not None:
-                        counts = np.zeros(len(initials), dtype=np.int64)
-                        scan(initials, counts, cost, parameters)
+                        counts = np.zeros(processed, dtype=np.int64)
+                        scan(initials[:processed], counts, cost, parameters)
                         local_cost.append(counts)
                     if verbose:
                         print(f'{round_index + 1:03d} {domain.size:12d} {missed.sum():12d} worst level missed: {100*missed.max()/len(ds):.2f}% {radius:.6f}', flush=True)

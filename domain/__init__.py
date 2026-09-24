@@ -103,6 +103,8 @@ class Configuration:
         omitted axes use shortest periodic distance
     random: bool, default=False
         random reference directions (projection and odd ray spaces force random directions)
+    check: bool, default=False
+        check coverage and radius convergence after each expansion batch
     convergence: Optional[float], default=None
         additional radius-change tolerance in percent
     epsilon: float, default=1.0E-6
@@ -140,6 +142,7 @@ class Configuration:
     random: bool = False
     epsilon: float = 1.0E-6
     convergence: Optional[float] = field(default=None, kw_only=True)
+    check: bool = field(default=False, kw_only=True)
 
     def __post_init__(self) -> None:
         self.lb = numpy.asarray(self.lb, dtype=float64)
@@ -177,6 +180,26 @@ def change(previous, current, tolerance):
     if previous <= 0 or current <= 0:
         return False
     return 100*abs(previous/current - 1) < tolerance
+
+
+def advance(initial, configuration, deposit, measure, previous, dimension, ray_count):
+    batch = (configuration.batch if configuration.check else None)
+    batch = max(1, len(initial)) if batch is None else batch
+    processed = 0
+    for start in range(0, len(initial), batch):
+        local = initial[start:start + batch]
+        deposit(local)
+        processed += len(local)
+        keys, radii, missed = measure()
+        hit = keys >= 0
+        radius = float(mean(dimension, radii[hit])) if numpy.any(hit) else 0.0
+        if (numpy.all(missed <= (1 - configuration.termination)*ray_count) and change(previous, radius, configuration.convergence)):
+            break
+    if not len(initial):
+        keys, radii, missed = measure()
+        hit = keys >= 0
+        radius = float(mean(dimension, radii[hit])) if numpy.any(hit) else 0.0
+    return keys, radii, missed, radius, processed
 
 
 @dataclass
@@ -636,13 +659,12 @@ def compute(
                     )
                     initial = sample(configuration.npoints, configuration.scale*cell, centers)
                     targets = domains if container is None else [*domains, container]
-                    project(initial, generator, parameters, configuration, targets, escaping=True, **options)
-                    domain, *_ = domains
-                    keys, rs, xs = domain.boundary(*pair, configuration.center, ds)
-                    rs = rs[keys != -1]
-                    xs = xs[keys != -1]
-                    flag = int(numpy.sum(keys == -1))
-                    radius = 0.0 if len(rs) == 0 else float(mean(configuration.dimension, rs))
+                    def deposit(local):
+                        project(local, generator, parameters, configuration, targets, escaping=True, **options)
+                    def measure():
+                        keys, radii, _ = domain.boundary(*pair, configuration.center, ds)
+                        return keys, radii, numpy.count_nonzero(keys < 0)
+                    keys, rs, flag, radius, processed = advance(initial, configuration, deposit, measure, previous, configuration.dimension, len(ds))
                     boundary = Domain(configuration.lb, configuration.ub, cell)
                     keys = numpy.unique(keys[keys != -1])
                     boundary.insert(keys)
@@ -651,8 +673,8 @@ def compute(
                     local_data.append(numpy.asarray([flag, domain.size, len(ds)]))
                     local_rads.append(radius)
                     if local_cost is not None:
-                        out = numpy.zeros(len(initial), dtype=numpy.int64)
-                        scan(initial, out, cost, parameters)
+                        out = numpy.zeros(processed, dtype=numpy.int64)
+                        scan(initial[:processed], out, cost, parameters)
                         local_cost.append(out)
                     if verbose:
                         total = 0 if container is None else container.size
@@ -834,17 +856,16 @@ def compute_indicator(
                         power=configuration.power,
                     )
                     initial = sample(configuration.npoints, configuration.scale*cell, centers)
-                    values = numpy.zeros(len(initial), dtype=float64)
-                    scan(initial, values, metric, parameters)
-                    escaped = initial[~numpy.isfinite(values) | (values > threshold)]
                     targets = domains if container is None else [*domains, container]
-                    project(escaped, generator, parameters, configuration, targets, **options)
-                    domain, *_ = domains
-                    keys, rs, xs = domain.boundary(*pair, configuration.center, ds)
-                    rs = rs[keys != -1]
-                    xs = xs[keys != -1]
-                    flag = int(numpy.sum(keys == -1))
-                    radius = 0.0 if len(rs) == 0 else float(mean(configuration.dimension, rs))
+                    def deposit(local):
+                        values = numpy.zeros(len(local), dtype=float64)
+                        scan(local, values, metric, parameters)
+                        escaped = local[~numpy.isfinite(values) | (values > threshold)]
+                        project(escaped, generator, parameters, configuration, targets, **options)
+                    def measure():
+                        keys, radii, _ = domain.boundary(*pair, configuration.center, ds)
+                        return keys, radii, numpy.count_nonzero(keys < 0)
+                    keys, rs, flag, radius, processed = advance(initial, configuration, deposit, measure, previous, configuration.dimension, len(ds))
                     boundary = Domain(configuration.lb, configuration.ub, cell)
                     keys = numpy.unique(keys[keys != -1])
                     boundary.insert(keys)
@@ -853,8 +874,8 @@ def compute_indicator(
                     local_data.append(numpy.asarray([flag, domain.size, len(ds)]))
                     local_rads.append(radius)
                     if local_cost is not None:
-                        out = numpy.zeros(len(initial), dtype=numpy.int64)
-                        scan(initial, out, cost, parameters)
+                        out = numpy.zeros(processed, dtype=numpy.int64)
+                        scan(initial[:processed], out, cost, parameters)
                         local_cost.append(out)
                     if verbose:
                         total = 0 if container is None else container.size
